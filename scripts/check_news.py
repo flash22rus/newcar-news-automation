@@ -1,4 +1,4 @@
-
+from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 #!/usr/bin/env python3
 """NEWCAR: безопасный сбор кандидатов новостей из RSS.
 На этом этапе ничего не публикуется и Worker не вызывается.
@@ -44,28 +44,31 @@ def parse_date(value):
 
 
 
+
 def fetch_feed(name, url):
-    # Кодируем кириллицу в query string для корректного HTTP-запроса.
     parts = urlsplit(url)
-    safe_query = quote(parts.query, safe="=&%+:/?@!$'()*,-._~")
+    query = urlencode(parse_qsl(parts.query, keep_blank_values=True))
     encoded_url = urlunsplit((
         parts.scheme,
         parts.netloc,
         parts.path,
-        safe_query,
+        query,
         parts.fragment,
     ))
 
     request = urllib.request.Request(
         encoded_url,
-        headers={"User-Agent": "NEWCAR-NewsResearch/1.0"},
+        headers={"User-Agent": "Mozilla/5.0 NEWCAR-NewsResearch/1.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             raw = response.read(2_000_000)
         root = ET.fromstring(raw)
     except Exception as exc:
-        print(f"WARNING: feed unavailable: {name}: {type(exc).__name__}: {exc}")
+        print(
+            f"WARNING: feed unavailable: {name}: "
+            f"{type(exc).__name__}: {ascii(str(exc))}"
+        )
         return []
 
     results = []
@@ -81,6 +84,7 @@ def fetch_feed(name, url):
                 "published_at": published.isoformat(),
             })
     return results
+
 
 
 

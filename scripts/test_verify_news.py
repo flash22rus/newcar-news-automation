@@ -228,6 +228,54 @@ class TestNewsAnalyzer(unittest.TestCase):
             "",
         )
 
+    # Google News decoder tests
+
+    @patch.object(verify_news, "gnewsdecoder")
+    def test_google_news_decoder_returns_publisher_url(self, mock_decoder):
+        original = "https://news.google.com/rss/articles/example"
+        publisher = "https://example.com/auto/news/123"
+
+        mock_decoder.return_value = {
+            "status": True,
+            "decoded_url": publisher,
+        }
+
+        result = verify_news.resolve_google_news_url(original)
+
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["original_url"], original)
+        self.assertEqual(result["url"], publisher)
+        self.assertIsNone(result["error"])
+        mock_decoder.assert_called_once_with(original, interval=1)
+
+    @patch.object(verify_news, "gnewsdecoder")
+    def test_google_news_decoder_failure_preserves_original(
+        self, mock_decoder
+    ):
+        original = "https://news.google.com/rss/articles/example"
+
+        mock_decoder.return_value = {
+            "status": False,
+            "message": "Unable to decode URL",
+        }
+
+        with patch.object(verify_news, "urlopen") as mock_urlopen:
+            response = MagicMock()
+            response.__enter__.return_value.geturl.return_value = original
+            response.__enter__.return_value.read.return_value = b""
+            mock_urlopen.return_value = response
+
+            result = verify_news.resolve_google_news_url(original)
+
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["original_url"], original)
+        self.assertEqual(result["url"], original)
+        self.assertEqual(
+            result["error"],
+            "redirect_did_not_reach_publisher",
+        )
+
+    @patch.object(verify_news, "gnewsdecoder", None)
     @patch.object(verify_news, "urlopen")
     def test_google_news_url_resolves_to_https_publisher(self, mock_urlopen):
         response = MagicMock()
@@ -239,35 +287,44 @@ class TestNewsAnalyzer(unittest.TestCase):
         result = verify_news.resolve_google_news_url(
             "https://news.google.com/rss/articles/example"
         )
+
         self.assertTrue(result["resolved"])
         self.assertEqual(
-            result["url"], "https://example.com/automotive/news"
+            result["url"],
+            "https://example.com/automotive/news",
         )
         self.assertIsNone(result["error"])
 
-    @patch.object(verify_news, "urlopen", side_effect=TimeoutError)
+    @patch.object(verify_news, "gnewsdecoder", None)
+    @patch.object(
+        verify_news, "urlopen", side_effect=TimeoutError
+    )
     def test_google_news_timeout_preserves_original_url(self, mock_urlopen):
         original = "https://news.google.com/rss/articles/example"
+
         result = verify_news.resolve_google_news_url(original)
+
         self.assertFalse(result["resolved"])
         self.assertEqual(result["url"], original)
         self.assertEqual(result["original_url"], original)
         self.assertEqual(result["error"], "connection_error")
 
+    @patch.object(verify_news, "gnewsdecoder", None)
     @patch.object(verify_news, "urlopen")
-    def test_google_news_url_still_on_google_is_unresolved(self, mock_urlopen):
+    def test_google_news_url_still_on_google_is_unresolved(
+        self, mock_urlopen
+    ):
+        original = "https://news.google.com/rss/articles/example"
+
         response = MagicMock()
-        response.__enter__.return_value.geturl.return_value = (
-            "https://news.google.com/rss/articles/example"
-        )
-        # Return bytes so the resolver can decode an empty response body.
+        response.__enter__.return_value.geturl.return_value = original
         response.__enter__.return_value.read.return_value = b""
         mock_urlopen.return_value = response
 
-        result = verify_news.resolve_google_news_url(
-            "https://news.google.com/rss/articles/example"
-        )
+        result = verify_news.resolve_google_news_url(original)
+
         self.assertFalse(result["resolved"])
+        self.assertEqual(result["url"], original)
         self.assertEqual(
             result["error"],
             "redirect_did_not_reach_publisher",
@@ -278,12 +335,14 @@ class TestNewsAnalyzer(unittest.TestCase):
             result = verify_news.resolve_google_news_url(
                 "https://example.com/news/123"
             )
+
         mock_urlopen.assert_not_called()
         self.assertTrue(result["resolved"])
         self.assertEqual(result["url"], "https://example.com/news/123")
 
     def test_empty_url_is_not_resolved(self):
         result = verify_news.resolve_google_news_url("")
+
         self.assertFalse(result["resolved"])
         self.assertEqual(result["url"], "")
         self.assertEqual(result["error"], "empty_url")
@@ -292,6 +351,7 @@ class TestNewsAnalyzer(unittest.TestCase):
         result = verify_news.resolve_google_news_url(
             "http://example.com/news"
         )
+
         self.assertFalse(result["resolved"])
         self.assertEqual(result["error"], "invalid_https_url")
 
@@ -299,6 +359,7 @@ class TestNewsAnalyzer(unittest.TestCase):
     def test_group_url_resolution_updates_report(self, mock_resolve):
         original = "https://news.google.com/rss/articles/example"
         publisher = "https://example.com/news/123"
+
         mock_resolve.return_value = {
             "original_url": original,
             "url": publisher,
@@ -310,6 +371,7 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "Импорт автомобилей из Японии в Россию",
             "url": original,
         }])
+
         stats = verify_news.resolve_group_urls(groups)
         member = groups[0]["members"][0]
 
@@ -321,8 +383,11 @@ class TestNewsAnalyzer(unittest.TestCase):
         self.assertEqual(stats["google_news_redirects_unresolved"], 0)
 
     @patch.object(verify_news, "resolve_google_news_url")
-    def test_failed_resolution_keeps_original_and_search_hint(self, mock_resolve):
+    def test_failed_resolution_keeps_original_and_search_hint(
+        self, mock_resolve
+    ):
         original = "https://news.google.com/rss/articles/example"
+
         mock_resolve.return_value = {
             "original_url": original,
             "url": original,
@@ -336,6 +401,7 @@ class TestNewsAnalyzer(unittest.TestCase):
             "source_name": "Example News",
             "source_url": "https://example.com/",
         }])
+
         stats = verify_news.resolve_group_urls(groups)
         member = groups[0]["members"][0]
 
@@ -352,7 +418,9 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "Импорт автомобилей из Японии в Россию",
             "url": "https://example.com/news/123",
         }])
+
         stats = verify_news.resolve_group_urls(groups)
+
         mock_resolve.assert_not_called()
         self.assertEqual(stats["google_news_redirects_resolved"], 0)
         self.assertEqual(stats["google_news_redirects_unresolved"], 0)

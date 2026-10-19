@@ -2,12 +2,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Автоматические тесты анализатора новостей NEWCAR."""
+"""Automated tests for the NEWCAR news analyzer."""
 
 import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "verify_news.py"
@@ -65,8 +66,8 @@ class TestNewsAnalyzer(unittest.TestCase):
         }
 
         groups = verify_news.build_groups([candidate])
-        self.assertEqual(len(groups), 1)
 
+        self.assertEqual(len(groups), 1)
         member = groups[0]["members"][0]
         self.assertEqual(
             member["published_utc"],
@@ -111,11 +112,144 @@ class TestNewsAnalyzer(unittest.TestCase):
         }])
 
         member = groups[0]["members"][0]
+
         self.assertTrue(member["manual_checks"])
         self.assertEqual(
             member["verification_status"],
             "needs_manual_verification",
         )
+
+    @patch.object(verify_news, "urlopen")
+    def test_google_news_url_resolves_to_https_publisher(self, mock_urlopen):
+        response = MagicMock()
+        response.__enter__.return_value.geturl.return_value = (
+            "https://example.com/automotive/news"
+        )
+        mock_urlopen.return_value = response
+
+        result = verify_news.resolve_google_news_url(
+            "https://news.google.com/rss/articles/example"
+        )
+
+        self.assertTrue(result["resolved"])
+        self.assertEqual(
+            result["url"],
+            "https://example.com/automotive/news",
+        )
+        self.assertIsNone(result["error"])
+
+    @patch.object(verify_news, "urlopen", side_effect=TimeoutError)
+    def test_google_news_timeout_preserves_original_url(self, mock_urlopen):
+        original = "https://news.google.com/rss/articles/example"
+
+        result = verify_news.resolve_google_news_url(original)
+
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["url"], original)
+        self.assertEqual(result["original_url"], original)
+        self.assertEqual(result["error"], "connection_error")
+
+    @patch.object(verify_news, "urlopen")
+    def test_google_news_url_still_on_google_is_unresolved(self, mock_urlopen):
+        response = MagicMock()
+        response.__enter__.return_value.geturl.return_value = (
+            "https://news.google.com/rss/articles/example"
+        )
+        mock_urlopen.return_value = response
+
+        result = verify_news.resolve_google_news_url(
+            "https://news.google.com/rss/articles/example"
+        )
+
+        self.assertFalse(result["resolved"])
+        self.assertEqual(
+            result["error"],
+            "redirect_did_not_reach_publisher",
+        )
+
+    def test_regular_publisher_url_is_not_requested(self):
+        with patch.object(verify_news, "urlopen") as mock_urlopen:
+            result = verify_news.resolve_google_news_url(
+                "https://example.com/news/123"
+            )
+
+        mock_urlopen.assert_not_called()
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["url"], "https://example.com/news/123")
+
+    def test_empty_url_is_not_resolved(self):
+        result = verify_news.resolve_google_news_url("")
+
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["url"], "")
+        self.assertEqual(result["error"], "empty_url")
+
+    @patch.object(verify_news, "resolve_google_news_url")
+    def test_group_url_resolution_updates_report(self, mock_resolve):
+        original = "https://news.google.com/rss/articles/example"
+        publisher = "https://example.com/news/123"
+
+        mock_resolve.return_value = {
+            "original_url": original,
+            "url": publisher,
+            "resolved": True,
+            "error": None,
+        }
+
+        groups = verify_news.build_groups([{
+            "title": "Импорт автомобилей из Японии в Россию",
+            "url": original,
+        }])
+
+        stats = verify_news.resolve_group_urls(groups)
+        member = groups[0]["members"][0]
+
+        self.assertEqual(member["url"], publisher)
+        self.assertEqual(member["original_url"], original)
+        self.assertFalse(member["source_url_needs_resolution"])
+        self.assertIsNone(member["url_resolution_error"])
+        self.assertEqual(stats["google_news_redirects_resolved"], 1)
+        self.assertEqual(stats["google_news_redirects_unresolved"], 0)
+
+    @patch.object(verify_news, "resolve_google_news_url")
+    def test_failed_group_resolution_keeps_original_url(self, mock_resolve):
+        original = "https://news.google.com/rss/articles/example"
+
+        mock_resolve.return_value = {
+            "original_url": original,
+            "url": original,
+            "resolved": False,
+            "error": "network_error",
+        }
+
+        groups = verify_news.build_groups([{
+            "title": "Импорт автомобилей из Японии в Россию",
+            "url": original,
+        }])
+
+        stats = verify_news.resolve_group_urls(groups)
+        member = groups[0]["members"][0]
+
+        self.assertEqual(member["url"], original)
+        self.assertEqual(member["original_url"], original)
+        self.assertTrue(member["source_url_needs_resolution"])
+        self.assertEqual(member["url_resolution_error"], "network_error")
+        self.assertEqual(stats["google_news_redirects_resolved"], 0)
+        self.assertEqual(stats["google_news_redirects_unresolved"], 1)
+
+    @patch.object(verify_news, "resolve_google_news_url")
+    def test_non_google_urls_are_skipped(self, mock_resolve):
+        groups = verify_news.build_groups([{
+            "title": "Импорт автомобилей из Японии в Россию",
+            "url": "https://example.com/news/123",
+        }])
+
+        stats = verify_news.resolve_group_urls(groups)
+
+        mock_resolve.assert_not_called()
+        self.assertEqual(stats["google_news_redirects_resolved"], 0)
+        self.assertEqual(stats["google_news_redirects_unresolved"], 0)
+        self.assertEqual(stats["non_google_urls_skipped"], 1)
 
 
 if __name__ == "__main__":

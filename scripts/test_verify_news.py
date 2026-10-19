@@ -255,9 +255,9 @@ class TestNewsAnalyzer(unittest.TestCase):
         original = "https://news.google.com/rss/articles/example"
 
         mock_decoder.return_value = {
-            "status": False,
-            "message": "Unable to decode URL",
-        }
+    "success": False,
+    "message": "Unable to decode URL",
+}
 
         with patch.object(verify_news, "urlopen") as mock_urlopen:
             response = MagicMock()

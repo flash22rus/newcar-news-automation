@@ -9,6 +9,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "verify_news.py"
@@ -26,7 +27,6 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "Импорт автомобилей из Японии в Россию",
             "description": "Изменились цены на доставку",
         })
-
         self.assertIn("relevance_score", result)
         self.assertIn("matched_categories", result)
         self.assertIn("relevance_label", result)
@@ -38,23 +38,18 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "",
             "description": "Импорт автомобилей из Японии",
         })
-
         self.assertEqual(result["relevance_score"], 0)
         self.assertEqual(result["relevance_label"], "low")
 
     def test_google_news_redirect_is_detected(self):
-        self.assertTrue(
-            verify_news.is_google_news_redirect(
-                "https://news.google.com/rss/articles/example"
-            )
-        )
+        self.assertTrue(verify_news.is_google_news_redirect(
+            "https://news.google.com/rss/articles/example"
+        ))
 
     def test_regular_publisher_url_is_not_redirect(self):
-        self.assertFalse(
-            verify_news.is_google_news_redirect(
-                "https://example.com/news/123"
-            )
-        )
+        self.assertFalse(verify_news.is_google_news_redirect(
+            "https://example.com/news/123"
+        ))
 
     def test_publication_date_uses_published_utc(self):
         candidate = {
@@ -64,13 +59,10 @@ class TestNewsAnalyzer(unittest.TestCase):
             "description": "Новости автомобильного импорта",
             "feed": "test",
         }
-
         groups = verify_news.build_groups([candidate])
-
         self.assertEqual(len(groups), 1)
-        member = groups[0]["members"][0]
         self.assertEqual(
-            member["published_utc"],
+            groups[0]["members"][0]["published_utc"],
             "2026-10-19T12:00:00+00:00",
         )
 
@@ -80,12 +72,9 @@ class TestNewsAnalyzer(unittest.TestCase):
             "url": "https://example.com/news/2",
             "published": "2026-10-19T11:00:00+00:00",
         }
-
         groups = verify_news.build_groups([candidate])
-        member = groups[0]["members"][0]
-
         self.assertEqual(
-            member["published_utc"],
+            groups[0]["members"][0]["published_utc"],
             "2026-10-19T11:00:00+00:00",
         )
 
@@ -97,7 +86,6 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "Импорт автомобилей из Японии в Россию",
             "url": "https://example.com/news/3",
         }])
-
         self.assertEqual(len(groups), 1)
         self.assertFalse(groups[0]["publication_ready"])
         self.assertEqual(
@@ -110,13 +98,49 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "Новости автомобильного импорта",
             "url": "https://example.com/news/4",
         }])
-
         member = groups[0]["members"][0]
-
         self.assertTrue(member["manual_checks"])
         self.assertEqual(
             member["verification_status"],
             "needs_manual_verification",
+        )
+
+    def test_publisher_metadata_is_preserved(self):
+        groups = verify_news.build_groups([{
+            "title": "Импорт автомобилей из Японии в Россию",
+            "url": "https://news.google.com/rss/articles/example",
+            "source_name": "Example News",
+            "source_url": "https://example.com/",
+        }])
+        member = groups[0]["members"][0]
+        self.assertEqual(member["source_name"], "Example News")
+        self.assertEqual(member["source_url"], "https://example.com/")
+        self.assertTrue(member["publisher_search_url"])
+
+    def test_publisher_search_url_uses_publisher_domain(self):
+        url = verify_news.build_publisher_search_url(
+            "Импорт автомобилей из Японии",
+            "Example News",
+            "https://www.example.com/",
+        )
+        self.assertIn("google.com/search?q=", url)
+        query = parse_qs(urlparse(url).query)["q"][0]
+        self.assertIn("site:example.com", query)
+        self.assertIn("Импорт", query)
+
+    def test_publisher_search_url_falls_back_to_source_name(self):
+        url = verify_news.build_publisher_search_url(
+            "Новости автомобильного рынка",
+            "Example News",
+            "",
+        )
+        query = parse_qs(urlparse(url).query)["q"][0]
+        self.assertIn("Example News", query)
+
+    def test_empty_title_has_no_search_url(self):
+        self.assertEqual(
+            verify_news.build_publisher_search_url("", "Example", ""),
+            "",
         )
 
     @patch.object(verify_news, "urlopen")
@@ -126,24 +150,17 @@ class TestNewsAnalyzer(unittest.TestCase):
             "https://example.com/automotive/news"
         )
         mock_urlopen.return_value = response
-
         result = verify_news.resolve_google_news_url(
             "https://news.google.com/rss/articles/example"
         )
-
         self.assertTrue(result["resolved"])
-        self.assertEqual(
-            result["url"],
-            "https://example.com/automotive/news",
-        )
+        self.assertEqual(result["url"], "https://example.com/automotive/news")
         self.assertIsNone(result["error"])
 
     @patch.object(verify_news, "urlopen", side_effect=TimeoutError)
     def test_google_news_timeout_preserves_original_url(self, mock_urlopen):
         original = "https://news.google.com/rss/articles/example"
-
         result = verify_news.resolve_google_news_url(original)
-
         self.assertFalse(result["resolved"])
         self.assertEqual(result["url"], original)
         self.assertEqual(result["original_url"], original)
@@ -156,11 +173,9 @@ class TestNewsAnalyzer(unittest.TestCase):
             "https://news.google.com/rss/articles/example"
         )
         mock_urlopen.return_value = response
-
         result = verify_news.resolve_google_news_url(
             "https://news.google.com/rss/articles/example"
         )
-
         self.assertFalse(result["resolved"])
         self.assertEqual(
             result["error"],
@@ -172,38 +187,37 @@ class TestNewsAnalyzer(unittest.TestCase):
             result = verify_news.resolve_google_news_url(
                 "https://example.com/news/123"
             )
-
         mock_urlopen.assert_not_called()
         self.assertTrue(result["resolved"])
         self.assertEqual(result["url"], "https://example.com/news/123")
 
     def test_empty_url_is_not_resolved(self):
         result = verify_news.resolve_google_news_url("")
-
         self.assertFalse(result["resolved"])
         self.assertEqual(result["url"], "")
         self.assertEqual(result["error"], "empty_url")
+
+    def test_non_https_publisher_url_is_rejected(self):
+        result = verify_news.resolve_google_news_url("http://example.com/news")
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["error"], "invalid_https_url")
 
     @patch.object(verify_news, "resolve_google_news_url")
     def test_group_url_resolution_updates_report(self, mock_resolve):
         original = "https://news.google.com/rss/articles/example"
         publisher = "https://example.com/news/123"
-
         mock_resolve.return_value = {
             "original_url": original,
             "url": publisher,
             "resolved": True,
             "error": None,
         }
-
         groups = verify_news.build_groups([{
             "title": "Импорт автомобилей из Японии в Россию",
             "url": original,
         }])
-
         stats = verify_news.resolve_group_urls(groups)
         member = groups[0]["members"][0]
-
         self.assertEqual(member["url"], publisher)
         self.assertEqual(member["original_url"], original)
         self.assertFalse(member["source_url_needs_resolution"])
@@ -212,29 +226,27 @@ class TestNewsAnalyzer(unittest.TestCase):
         self.assertEqual(stats["google_news_redirects_unresolved"], 0)
 
     @patch.object(verify_news, "resolve_google_news_url")
-    def test_failed_group_resolution_keeps_original_url(self, mock_resolve):
+    def test_failed_resolution_keeps_original_and_search_hint(self, mock_resolve):
         original = "https://news.google.com/rss/articles/example"
-
         mock_resolve.return_value = {
             "original_url": original,
             "url": original,
             "resolved": False,
             "error": "network_error",
         }
-
         groups = verify_news.build_groups([{
             "title": "Импорт автомобилей из Японии в Россию",
             "url": original,
+            "source_name": "Example News",
+            "source_url": "https://example.com/",
         }])
-
         stats = verify_news.resolve_group_urls(groups)
         member = groups[0]["members"][0]
-
         self.assertEqual(member["url"], original)
         self.assertEqual(member["original_url"], original)
         self.assertTrue(member["source_url_needs_resolution"])
         self.assertEqual(member["url_resolution_error"], "network_error")
-        self.assertEqual(stats["google_news_redirects_resolved"], 0)
+        self.assertTrue(member["publisher_search_url"])
         self.assertEqual(stats["google_news_redirects_unresolved"], 1)
 
     @patch.object(verify_news, "resolve_google_news_url")
@@ -243,9 +255,7 @@ class TestNewsAnalyzer(unittest.TestCase):
             "title": "Импорт автомобилей из Японии в Россию",
             "url": "https://example.com/news/123",
         }])
-
         stats = verify_news.resolve_group_urls(groups)
-
         mock_resolve.assert_not_called()
         self.assertEqual(stats["google_news_redirects_resolved"], 0)
         self.assertEqual(stats["google_news_redirects_unresolved"], 0)

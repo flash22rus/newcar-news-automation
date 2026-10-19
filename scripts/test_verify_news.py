@@ -236,9 +236,9 @@ class TestNewsAnalyzer(unittest.TestCase):
         publisher = "https://example.com/auto/news/123"
 
         mock_decoder.return_value = {
-            "status": True,
-            "decoded_url": publisher,
-        }
+    "success": True,
+    "decoded_url": publisher,
+}
 
         result = verify_news.resolve_google_news_url(original)
 

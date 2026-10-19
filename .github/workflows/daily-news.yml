@@ -26,6 +26,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Google News decoder
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "googlenewsdecoder==0.2.2" "selectolax<1.0"
+
       - name: Check required files
         run: |
           set -eu

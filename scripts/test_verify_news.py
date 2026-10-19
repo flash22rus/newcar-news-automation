@@ -260,6 +260,8 @@ class TestNewsAnalyzer(unittest.TestCase):
         response.__enter__.return_value.geturl.return_value = (
             "https://news.google.com/rss/articles/example"
         )
+        # Return bytes so the resolver can decode an empty response body.
+        response.__enter__.return_value.read.return_value = b""
         mock_urlopen.return_value = response
 
         result = verify_news.resolve_google_news_url(

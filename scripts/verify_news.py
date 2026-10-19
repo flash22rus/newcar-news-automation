@@ -365,6 +365,7 @@ def extract_publisher_url_from_id(url):
 
 
 
+
 def resolve_google_news_url(url):
     """Resolve Google News links and preserve the original on failure."""
     original = str(url or "").strip()
@@ -392,6 +393,129 @@ def resolve_google_news_url(url):
             "resolved": True,
             "error": None,
         }
+
+    # First try to extract a publisher URL from the article ID.
+    embedded = extract_publisher_url_from_id(original)
+    if (
+        embedded
+        and safe_https_url(embedded)
+        and not is_google_news_redirect(embedded)
+    ):
+        return {
+            "original_url": original,
+            "url": embedded,
+            "resolved": True,
+            "error": None,
+        }
+
+    # Use the installed Google News decoder.
+    if gnewsdecoder is not None:
+        try:
+            decoded = gnewsdecoder(
+                original,
+                interval=1,
+                timeout=TIMEOUT_SECONDS,
+            )
+
+            # IMPORTANT: googlenewsdecoder 0.2.2 returns "success",
+            # not "status".
+            if isinstance(decoded, dict) and decoded.get("success"):
+                candidate = str(
+                    decoded.get("decoded_url") or ""
+                ).strip()
+
+                if (
+                    safe_https_url(candidate)
+                    and not is_google_news_redirect(candidate)
+                ):
+                    return {
+                        "original_url": original,
+                        "url": candidate,
+                        "resolved": True,
+                        "error": None,
+                    }
+
+        except Exception:
+            # Continue to the HTTP fallback.
+            pass
+
+    # Fallback: follow the link and inspect the response HTML.
+    request = Request(
+        original,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+        },
+        method="GET",
+    )
+
+    error = "redirect_did_not_reach_publisher"
+
+    try:
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            final_url = response.geturl()
+            body = response.read(1_500_000).decode(
+                "utf-8", errors="ignore"
+            )
+
+        if (
+            safe_https_url(final_url)
+            and not is_google_news_redirect(final_url)
+        ):
+            return {
+                "original_url": original,
+                "url": final_url,
+                "resolved": True,
+                "error": None,
+            }
+
+        patterns = [
+            r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
+            r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']canonical["\']',
+            r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:url["\']',
+            r'<meta[^>]+name=["\']twitter:url["\'][^>]+content=["\']([^"\']+)',
+        ]
+
+        for pattern in patterns:
+            for match in re.findall(
+                pattern, body, flags=re.IGNORECASE
+            ):
+                candidate = unquote(
+                    match.strip()
+                ).replace("&amp;", "&")
+
+                if (
+                    safe_https_url(candidate)
+                    and not is_google_news_redirect(candidate)
+                ):
+                    return {
+                        "original_url": original,
+                        "url": candidate,
+                        "resolved": True,
+                        "error": None,
+                    }
+
+    except (TimeoutError, URLError):
+        error = "connection_error"
+    except Exception:
+        error = "connection_error"
+
+    return {
+        "original_url": original,
+        "url": original,
+        "resolved": False,
+        "error": error,
+    }
+
 
     # First try the existing lightweight extraction.
     embedded = extract_publisher_url_from_id(original)

@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Rank NEWCAR news and resolve Google News article URLs for manual review."""
+"""Rank NEWCAR news and resolve Google News URLs for manual review."""
 
 import base64
 import json
@@ -103,13 +103,16 @@ RUSSIAN_CONTEXT_TERMS = [
     "в российскую федерацию", "в рф", "по рф",
     "минпромторг", "правительство рф",
 ]
+
 SIBERIA_TERMS = ["алтайский край", "барнаул", "новосибирск", "сибирь"]
+
 FOREIGN_MARKET_TERMS = [
     "утильсбор в казахстане", "казахстанский утильсбор",
     "авторынок азербайджана", "рынок автомобилей казахстана",
     "автомобильный рынок казахстана", "импорт автомобилей в казахстан",
     "внутренний авторынок казахстана",
 ]
+
 ACTION_TERMS = [
     "изменится", "изменились", "изменился", "вступил в силу",
     "вступит в силу", "с 1 января", "повысили", "снизили",
@@ -118,6 +121,7 @@ ACTION_TERMS = [
     "вырастет", "вырос", "выросли", "повышения", "привязали",
     "ужесточил", "ужесточили", "потерял первенство",
 ]
+
 PRIORITY_TITLE_TERMS = [
     "утильсбор", "правила ввоза", "импорт автомобилей",
     "автомобили из японии", "автомобили из китая",
@@ -156,6 +160,7 @@ def build_publisher_search_url(title, source_name="", source_url=""):
     title = str(title or "").strip()
     source_name = str(source_name or "").strip()
     source_url = str(source_url or "").strip()
+
     if not title:
         return ""
 
@@ -175,10 +180,13 @@ def build_publisher_search_url(title, source_name="", source_url=""):
 def score_relevance(candidate):
     title = str(candidate.get("title") or "").strip()
     description = str(candidate.get("description") or "").strip()
+
     if not title:
         return {
-            "relevance_score": 0, "matched_categories": [],
-            "relevance_label": "low", "ranking_reasons": ["missing_title"],
+            "relevance_score": 0,
+            "matched_categories": [],
+            "relevance_label": "low",
+            "ranking_reasons": ["missing_title"],
             "geography": "unknown",
         }
 
@@ -188,16 +196,20 @@ def score_relevance(candidate):
         category for category, keywords in CATEGORIES.items()
         if any(keyword in text for keyword in keywords)
     ]
+
     reasons = []
     score = 0
     for category in matched:
         score += WEIGHTS[category]
         reasons.append(f"topic:{category}")
 
-    has_russian_context = any(term in text for term in RUSSIAN_CONTEXT_TERMS)
+    has_russian_context = any(
+        term in text for term in RUSSIAN_CONTEXT_TERMS
+    )
     if has_russian_context:
         score += 20
         reasons.append("geography:russia")
+
     if any(term in text for term in SIBERIA_TERMS):
         score += 8
         reasons.append("geography:siberia")
@@ -206,15 +218,18 @@ def score_relevance(candidate):
     if foreign_only and not has_russian_context:
         score -= 25
         reasons.append("penalty:foreign_domestic_market")
+
     if any(term in text for term in ACTION_TERMS):
         score += 8
         reasons.append("actionable_change")
+
     if any(term in title_lower for term in PRIORITY_TITLE_TERMS):
         score += 8
         reasons.append("title_matches_priority_topic")
 
     score = max(0, min(100, score))
     label = "high" if score >= 65 else "medium" if score >= 35 else "low"
+
     return {
         "relevance_score": score,
         "matched_categories": matched,
@@ -229,7 +244,11 @@ def normalize_member(candidate):
     original_url = str(candidate.get("url") or "").strip()
     source_name = str(candidate.get("source_name") or "").strip()
     source_url = str(candidate.get("source_url") or "").strip()
-    published_utc = candidate.get("published_utc") or candidate.get("published") or ""
+    published_utc = (
+        candidate.get("published_utc")
+        or candidate.get("published")
+        or ""
+    )
 
     return {
         "title": title,
@@ -258,19 +277,29 @@ def normalize_member(candidate):
 
 
 def build_groups(candidates):
-    groups, seen_urls, seen_titles = [], set(), set()
+    groups = []
+    seen_urls = set()
+    seen_titles = set()
+
     for candidate in candidates or []:
         member = normalize_member(candidate)
-        title_key = re.sub(r"\s+", " ", member["title"].lower()).strip()
+        title_key = re.sub(
+            r"\s+", " ", member["title"].lower()
+        ).strip()
         url_key = member["url"].lower().split("#", 1)[0].rstrip("/")
+
         if not title_key and not url_key:
             continue
-        if (url_key and url_key in seen_urls) or (title_key and title_key in seen_titles):
+        if url_key and url_key in seen_urls:
             continue
+        if title_key and title_key in seen_titles:
+            continue
+
         if url_key:
             seen_urls.add(url_key)
         if title_key:
             seen_titles.add(title_key)
+
         groups.append({
             "title": member["title"],
             "relevance_score": member["relevance_score"],
@@ -282,110 +311,167 @@ def build_groups(candidates):
             "verification_status": "needs_manual_verification",
             "publication_ready": False,
         })
+
     groups.sort(
-        key=lambda g: (g["relevance_score"], g["members"][0].get("published_utc", "")),
+        key=lambda group: (
+            group["relevance_score"],
+            group["members"][0].get("published_utc", ""),
+        ),
         reverse=True,
     )
     return groups
 
 
 def extract_publisher_url_from_id(url):
-    """Try to find an embedded HTTPS article URL in a Google News URL payload."""
+    """Try to find an explicit publisher URL in a Google News article ID."""
     try:
         parsed = urlparse(str(url or ""))
         parts = [part for part in parsed.path.split("/") if part]
-        if not parts:
-            return None
 
-        # Google News RSS links often place the article ID after /articles/.
         for index, part in enumerate(parts[:-1]):
             if part not in ("articles", "read"):
                 continue
+
             token = parts[index + 1].split("?", 1)[0]
             padded = token + "=" * (-len(token) % 4)
+
             try:
-                decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+                decoded = base64.urlsafe_b64decode(
+                    padded.encode("ascii")
+                )
                 decoded_text = decoded.decode("utf-8", errors="ignore")
             except (ValueError, UnicodeError):
                 continue
 
-            # The payload can be binary/protobuf; only accept an explicit URL.
-            candidates = re.findall(r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", decoded_text)
+            candidates = re.findall(
+                r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+",
+                decoded_text,
+            )
             for candidate in candidates:
                 candidate = unquote(candidate).rstrip(".,);]")
-                if safe_https_url(candidate) and not is_google_news_redirect(candidate):
+                if (
+                    safe_https_url(candidate)
+                    and not is_google_news_redirect(candidate)
+                ):
                     return candidate
     except (TypeError, ValueError):
         pass
+
     return None
 
 
 def resolve_google_news_url(url):
-    """Resolve a Google News link; preserve the original URL on any failure."""
+    """Resolve Google News links while preserving the original on failure."""
     original = str(url or "").strip()
-    if not original:
-        return {"original_url": original, "url": original, "resolved": False, "error": "empty_url"}
-    if not safe_https_url(original):
-        return {"original_url": original, "url": original, "resolved": False, "error": "invalid_https_url"}
-    if not is_google_news_redirect(original):
-        return {"original_url": original, "url": original, "resolved": True, "error": None}
 
-    # First try decoding a URL embedded in the article identifier.
+    if not original:
+        return {
+            "original_url": original, "url": original,
+            "resolved": False, "error": "empty_url",
+        }
+
+    if not safe_https_url(original):
+        return {
+            "original_url": original, "url": original,
+            "resolved": False, "error": "invalid_https_url",
+        }
+
+    if not is_google_news_redirect(original):
+        return {
+            "original_url": original, "url": original,
+            "resolved": True, "error": None,
+        }
+
     embedded = extract_publisher_url_from_id(original)
     if embedded:
-        return {"original_url": original, "url": embedded, "resolved": True, "error": None}
+        return {
+            "original_url": original, "url": embedded,
+            "resolved": True, "error": None,
+        }
 
     request = Request(
         original,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; NEWCAR-NewsVerifier/1.0)"},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; NEWCAR-NewsVerifier/1.0)"
+            )
+        },
         method="GET",
     )
+
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             final_url = response.geturl()
-            body = response.read(1_500_000).decode("utf-8", errors="ignore")
+            body = response.read(1_500_000).decode(
+                "utf-8", errors="ignore"
+            )
 
-        if safe_https_url(final_url) and not is_google_news_redirect(final_url):
-            return {"original_url": original, "url": final_url, "resolved": True, "error": None}
+        if is_google_news_redirect(final_url):
+            error = "redirect_did_not_reach_publisher"
+        elif safe_https_url(final_url):
+            return {
+                "original_url": original, "url": final_url,
+                "resolved": True, "error": None,
+            }
+        else:
+            error = "invalid_redirect_target"
 
-        # If Google serves a page instead of redirecting, inspect common canonical metadata.
+        # Google sometimes returns a page instead of a direct redirect.
         patterns = [
             r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
             r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:url["\']',
         ]
+
         for pattern in patterns:
             for match in re.findall(pattern, body, flags=re.IGNORECASE):
                 candidate = unquote(match.strip())
-                if safe_https_url(candidate) and not is_google_news_redirect(candidate):
-                    return {"original_url": original, "url": candidate, "resolved": True, "error": None}
+                if (
+                    safe_https_url(candidate)
+                    and not is_google_news_redirect(candidate)
+                ):
+                    return {
+                        "original_url": original, "url": candidate,
+                        "resolved": True, "error": None,
+                    }
 
-        error = "redirect_did_not_reach_publisher"
     except (TimeoutError, URLError):
         error = "connection_error"
     except Exception:
         error = "connection_error"
 
-    return {"original_url": original, "url": original, "resolved": False, "error": error}
+    return {
+        "original_url": original,
+        "url": original,
+        "resolved": False,
+        "error": error,
+    }
 
 
 def resolve_group_urls(groups):
-    resolved_count = unresolved_count = skipped_count = 0
+    resolved_count = 0
+    unresolved_count = 0
+    skipped_count = 0
+
     for group in groups:
         for member in group.get("members", []):
             url = str(member.get("url") or "")
+
             if not is_google_news_redirect(url):
                 skipped_count += 1
                 continue
+
             result = resolve_google_news_url(url)
             member["original_url"] = result["original_url"]
             member["url"] = result["url"]
             member["source_url_needs_resolution"] = not result["resolved"]
             member["url_resolution_error"] = result["error"]
+
             if result["resolved"]:
                 resolved_count += 1
             else:
                 unresolved_count += 1
+
     return {
         "google_news_redirects_resolved": resolved_count,
         "google_news_redirects_unresolved": unresolved_count,
@@ -397,6 +483,7 @@ def main():
     if not INPUT_FILE.exists():
         print(f"ERROR: input file not found: {INPUT_FILE}", file=sys.stderr)
         return 1
+
     try:
         with INPUT_FILE.open("r", encoding="utf-8") as file:
             raw = json.load(file)
@@ -415,15 +502,24 @@ def main():
 
     groups = build_groups(candidates)
     url_stats = resolve_group_urls(groups)
-    members = [m for group in groups for m in group.get("members", [])]
+    members = [
+        member for group in groups for member in group.get("members", [])
+    ]
+
     report = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "candidate_count": len(candidates),
         "group_count": len(groups),
         "article_count": len(members),
-        "high_relevance_group_count": sum(g["relevance_label"] == "high" for g in groups),
-        "medium_relevance_group_count": sum(g["relevance_label"] == "medium" for g in groups),
-        "low_relevance_group_count": sum(g["relevance_label"] == "low" for g in groups),
+        "high_relevance_group_count": sum(
+            group["relevance_label"] == "high" for group in groups
+        ),
+        "medium_relevance_group_count": sum(
+            group["relevance_label"] == "medium" for group in groups
+        ),
+        "low_relevance_group_count": sum(
+            group["relevance_label"] == "low" for group in groups
+        ),
         "url_resolution": url_stats,
         "publication_ready": False,
         "fact_checking_complete": False,
@@ -453,8 +549,14 @@ def main():
     print(f"High relevance: {report['high_relevance_group_count']}")
     print(f"Medium relevance: {report['medium_relevance_group_count']}")
     print(f"Low relevance: {report['low_relevance_group_count']}")
-    print("Google News redirects resolved:", url_stats["google_news_redirects_resolved"])
-    print("Google News redirects unresolved:", url_stats["google_news_redirects_unresolved"])
+    print(
+        "Google News redirects resolved:",
+        url_stats["google_news_redirects_resolved"],
+    )
+    print(
+        "Google News redirects unresolved:",
+        url_stats["google_news_redirects_unresolved"],
+    )
     print("Publication ready: false")
     print(f"JSON report saved: {OUTPUT_FILE.name}")
     return 0

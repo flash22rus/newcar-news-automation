@@ -206,7 +206,7 @@ def build_groups(candidates: list[dict]) -> list[dict]:
             scored_members.append({
                 "title": member["title"],
                 "url": url,
-                "published": member.get("published"),
+               "published_utc": member.get("published_utc") or member.get("published"),
                 "description": member.get("description", ""),
                 "feed": member.get("feed", ""),
                 **relevance,

@@ -21,21 +21,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show commit and script version
+      - name: Show repository and script version
+        shell: bash
         run: |
+          set -eu
+
           echo "=== BRANCH ==="
           git branch --show-current
+
           echo "=== COMMIT ==="
           git rev-parse HEAD
+
+          echo "=== PYTHON VERSION ==="
+          python3 --version
+
+          echo "=== SCRIPT PATH ==="
+          test -f scripts/check_news.py
+          realpath scripts/check_news.py
+
           echo "=== SCRIPT MARKERS ==="
-          grep -nE 'NEWCAR RSS collector|feeds_successful|WARNING: feed unavailable|def collect_feed' scripts/check_news.py || true
-          echo "=== SCRIPT BEGINNING ==="
-          sed -n '1,35p' scripts/check_news.py
+          grep -nE 'NEWCAR RSS collector|feeds_successful|WARNING: feed unavailable|def collect_feed|JSON REPORT:' scripts/check_news.py || true
+
+          echo "=== FIRST 25 LINES ==="
+          sed -n '1,25p' scripts/check_news.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check Python syntax
+        run: python -m py_compile scripts/check_news.py
 
       - name: Collect RSS candidates
         run: python scripts/check_news.py

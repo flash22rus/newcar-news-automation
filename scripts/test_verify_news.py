@@ -236,9 +236,9 @@ class TestNewsAnalyzer(unittest.TestCase):
         publisher = "https://example.com/auto/news/123"
 
         mock_decoder.return_value = {
-    "success": True,
-    "decoded_url": publisher,
-}
+            "success": True,
+            "decoded_url": publisher,
+        }
 
         result = verify_news.resolve_google_news_url(original)
 
@@ -246,7 +246,11 @@ class TestNewsAnalyzer(unittest.TestCase):
         self.assertEqual(result["original_url"], original)
         self.assertEqual(result["url"], publisher)
         self.assertIsNone(result["error"])
-        mock_decoder.assert_called_once_with(original, interval=1)
+        mock_decoder.assert_called_once_with(
+            original,
+            interval=1,
+            timeout=verify_news.TIMEOUT_SECONDS,
+        )
 
     @patch.object(verify_news, "gnewsdecoder")
     def test_google_news_decoder_failure_preserves_original(
@@ -255,9 +259,9 @@ class TestNewsAnalyzer(unittest.TestCase):
         original = "https://news.google.com/rss/articles/example"
 
         mock_decoder.return_value = {
-    "success": False,
-    "message": "Unable to decode URL",
-}
+            "success": False,
+            "message": "Unable to decode URL",
+        }
 
         with patch.object(verify_news, "urlopen") as mock_urlopen:
             response = MagicMock()

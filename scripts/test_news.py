@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Автоматические тесты сборщика новостей NEWCAR."""
+"""Automated tests for the NEWCAR RSS collector."""
 
 import importlib.util
 import json
@@ -24,9 +24,15 @@ spec.loader.exec_module(check_news)
 class TestNewsCollector(unittest.TestCase):
 
     def test_configuration(self):
-        self.assertEqual(check_news.WINDOW_HOURS, 24)
-        self.assertGreater(check_news.MAX_CANDIDATES, 0)
-        self.assertEqual(len(check_news.FEEDS), 4)
+        self.assertEqual(check_news.WINDOW_HOURS, 36)
+        self.assertEqual(check_news.MAX_CANDIDATES, 40)
+        self.assertEqual(len(check_news.FEEDS), 9)
+
+        names = {feed["name"] for feed in check_news.FEEDS}
+        self.assertIn("Импорт автомобилей в Россию", names)
+        self.assertIn("Утилизационный сбор в России", names)
+        self.assertIn("Автомобили из Южной Кореи", names)
+        self.assertIn("Доставка и логистика", names)
 
     def test_rss_url_encodes_russian_query(self):
         url = check_news.build_feed_url('"импорт автомобилей"')
@@ -34,6 +40,8 @@ class TestNewsCollector(unittest.TestCase):
             url.startswith("https://news.google.com/rss/search?")
         )
         self.assertIn("q=", url)
+        self.assertIn("gl=RU", url)
+        self.assertIn("hl=ru", url)
 
     def test_parse_rfc822_date(self):
         result = check_news.parse_date("Mon, 19 Oct 2026 12:00:00 GMT")
@@ -57,15 +65,16 @@ class TestNewsCollector(unittest.TestCase):
             <link>https://example.com/news/1</link>
             <pubDate>Mon, 19 Oct 2026 12:00:00 GMT</pubDate>
             <description>Test description</description>
+            <source url="https://example.com/">Example News</source>
           </item>
         </channel></rss>"""
 
         entries = check_news.extract_entries(xml)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["title"], "Test car news")
-        self.assertEqual(
-            entries[0]["url"], "https://example.com/news/1"
-        )
+        self.assertEqual(entries[0]["url"], "https://example.com/news/1")
+        self.assertEqual(entries[0]["source_name"], "Example News")
+        self.assertEqual(entries[0]["source_url"], "https://example.com/")
 
     def test_rejects_non_https_links(self):
         xml = b"""<rss><channel><item>
@@ -73,7 +82,6 @@ class TestNewsCollector(unittest.TestCase):
           <link>http://example.com/news</link>
           <pubDate>Mon, 19 Oct 2026 12:00:00 GMT</pubDate>
         </item></channel></rss>"""
-
         self.assertEqual(check_news.extract_entries(xml), [])
 
     def test_deduplicates_urls_and_titles(self):
@@ -101,7 +109,6 @@ class TestNewsCollector(unittest.TestCase):
         ]
 
         result = check_news.deduplicate(items)
-
         self.assertEqual(len(result), 2)
         self.assertEqual(
             {item["title"] for item in result},
@@ -114,18 +121,14 @@ class TestNewsCollector(unittest.TestCase):
             "publication_ready": False,
             "candidates": [],
         }
-
         self.assertFalse(report["publication_ready"])
         self.assertEqual(report["stage"], "candidate_collection_only")
 
     def test_saved_report_structure(self):
         if not REPORT.exists():
-            self.skipTest(
-                "news_candidates.json отсутствует; сначала запустите сборщик."
-            )
+            self.skipTest("Run the collector before checking its output.")
 
         report = json.loads(REPORT.read_text(encoding="utf-8"))
-
         self.assertEqual(report.get("stage"), "candidate_collection_only")
         self.assertFalse(report.get("publication_ready"))
         self.assertIsInstance(report.get("candidates"), list)
@@ -140,9 +143,7 @@ class TestNewsCollector(unittest.TestCase):
 
     def test_report_freshness_window(self):
         if not REPORT.exists():
-            self.skipTest(
-                "news_candidates.json отсутствует; сначала запустите сборщик."
-            )
+            self.skipTest("Run the collector before checking its output.")
 
         report = json.loads(REPORT.read_text(encoding="utf-8"))
         generated = datetime.fromisoformat(report["generated_at"])

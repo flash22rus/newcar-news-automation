@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parent.parent
 INPUT_FILE = ROOT / "news_candidates.json"
 OUTPUT_FILE = ROOT / "news_verification.json"
 TIMEOUT_SECONDS = 12
+try:
+    from googlenewsdecoder import gnewsdecoder
+except ImportError:
+    gnewsdecoder = None
 
 CATEGORIES = {
     "import_rules": [
@@ -360,44 +364,92 @@ def extract_publisher_url_from_id(url):
     return None
 
 
+
 def resolve_google_news_url(url):
-    """Resolve Google News links while preserving the original on failure."""
+    """Resolve Google News links and preserve the original on failure."""
     original = str(url or "").strip()
 
     if not original:
         return {
-            "original_url": original, "url": original,
-            "resolved": False, "error": "empty_url",
+            "original_url": original,
+            "url": original,
+            "resolved": False,
+            "error": "empty_url",
         }
 
     if not safe_https_url(original):
         return {
-            "original_url": original, "url": original,
-            "resolved": False, "error": "invalid_https_url",
+            "original_url": original,
+            "url": original,
+            "resolved": False,
+            "error": "invalid_https_url",
         }
 
     if not is_google_news_redirect(original):
         return {
-            "original_url": original, "url": original,
-            "resolved": True, "error": None,
+            "original_url": original,
+            "url": original,
+            "resolved": True,
+            "error": None,
         }
 
+    # First try the existing lightweight extraction.
     embedded = extract_publisher_url_from_id(original)
-    if embedded:
+    if (
+        embedded
+        and safe_https_url(embedded)
+        and not is_google_news_redirect(embedded)
+    ):
         return {
-            "original_url": original, "url": embedded,
-            "resolved": True, "error": None,
+            "original_url": original,
+            "url": embedded,
+            "resolved": True,
+            "error": None,
         }
 
+    # Then use the dedicated Google News decoder.
+    if gnewsdecoder is not None:
+        try:
+            decoded = gnewsdecoder(original, interval=1)
+
+            if isinstance(decoded, dict) and decoded.get("status"):
+                candidate = str(
+                    decoded.get("decoded_url") or ""
+                ).strip()
+
+                if (
+                    safe_https_url(candidate)
+                    and not is_google_news_redirect(candidate)
+                ):
+                    return {
+                        "original_url": original,
+                        "url": candidate,
+                        "resolved": True,
+                        "error": None,
+                    }
+        except Exception:
+            # Fall back to HTTP resolution below.
+            pass
+
+    # Last fallback: follow the URL and inspect the returned HTML.
     request = Request(
         original,
         headers={
             "User-Agent": (
-                "Mozilla/5.0 (compatible; NEWCAR-NewsVerifier/1.0)"
-            )
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
         },
         method="GET",
     )
+
+    error = "redirect_did_not_reach_publisher"
 
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
@@ -406,33 +458,40 @@ def resolve_google_news_url(url):
                 "utf-8", errors="ignore"
             )
 
-        if is_google_news_redirect(final_url):
-            error = "redirect_did_not_reach_publisher"
-        elif safe_https_url(final_url):
+        if (
+            safe_https_url(final_url)
+            and not is_google_news_redirect(final_url)
+        ):
             return {
-                "original_url": original, "url": final_url,
-                "resolved": True, "error": None,
+                "original_url": original,
+                "url": final_url,
+                "resolved": True,
+                "error": None,
             }
-        else:
-            error = "invalid_redirect_target"
 
-        # Google sometimes returns a page instead of a direct redirect.
         patterns = [
             r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
+            r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']canonical["\']',
             r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:url["\']',
+            r'<meta[^>]+name=["\']twitter:url["\'][^>]+content=["\']([^"\']+)',
         ]
 
         for pattern in patterns:
-            for match in re.findall(pattern, body, flags=re.IGNORECASE):
-                candidate = unquote(match.strip())
+            for match in re.findall(
+                pattern, body, flags=re.IGNORECASE
+            ):
+                candidate = unquote(match.strip()).replace("&amp;", "&")
+
                 if (
                     safe_https_url(candidate)
                     and not is_google_news_redirect(candidate)
                 ):
                     return {
-                        "original_url": original, "url": candidate,
-                        "resolved": True, "error": None,
+                        "original_url": original,
+                        "url": candidate,
+                        "resolved": True,
+                        "error": None,
                     }
 
     except (TimeoutError, URLError):
@@ -446,6 +505,7 @@ def resolve_google_news_url(url):
         "resolved": False,
         "error": error,
     }
+
 
 
 def resolve_group_urls(groups):

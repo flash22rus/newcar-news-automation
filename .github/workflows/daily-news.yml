@@ -12,15 +12,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
-    name: Prepare news draft
+  collect:
+    name: Collect recent news candidates
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check project files
-        run: |
-          echo "NEWCAR news automation is not enabled yet."
-          echo "Next step: add and validate the news agent."
-          test -f README.md
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collect RSS candidates
+        run: python scripts/check_news.py

@@ -19,11 +19,13 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
+from pathlib import Path
 
 
 WINDOW_HOURS = 24
 MAX_CANDIDATES = 20
 TIMEOUT_SECONDS = 15
+OUTPUT_FILE = Path(__file__).resolve().parent.parent / "news_candidates.json"
 
 USER_AGENT = (
     "Mozilla/5.0 (compatible; NEWCAR-NewsBot/1.0; "
@@ -55,19 +57,14 @@ def utc_now():
 
 
 def clean_text(value):
-    """Удаляет HTML-разметку и лишние пробелы."""
     if not value:
         return ""
-
     value = unescape(str(value))
     value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"\s+", " ", value)
-
-    return value.strip()
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def parse_date(value):
-    """Преобразует дату RSS/Atom в UTC."""
     if not value:
         return None
 
@@ -75,38 +72,28 @@ def parse_date(value):
 
     try:
         dt = parsedate_to_datetime(value)
-
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-
         return dt.astimezone(timezone.utc)
-
     except (TypeError, ValueError, OverflowError):
         pass
 
     try:
-        dt = datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-
         return dt.astimezone(timezone.utc)
-
     except (TypeError, ValueError, OverflowError):
         return None
 
 
 def build_feed_url(query):
-    """Кодирует кириллицу и специальные символы в URL."""
     params = {
         "q": query,
         "hl": "ru",
         "gl": "RU",
         "ceid": "RU:ru",
     }
-
     return (
         "https://news.google.com/rss/search?"
         + urllib.parse.urlencode(params, encoding="utf-8")
@@ -114,7 +101,6 @@ def build_feed_url(query):
 
 
 def fetch_feed(url):
-    """Загружает RSS-ленту и возвращает XML."""
     request = urllib.request.Request(
         url,
         headers={
@@ -128,14 +114,11 @@ def fetch_feed(url):
     )
 
     with urllib.request.urlopen(
-        request,
-        timeout=TIMEOUT_SECONDS,
+        request, timeout=TIMEOUT_SECONDS
     ) as response:
-        status = response.status
+        if response.status != 200:
+            raise RuntimeError(f"HTTP status {response.status}")
         body = response.read()
-
-    if status != 200:
-        raise RuntimeError(f"HTTP status {status}")
 
     if not body:
         raise RuntimeError("Empty response")
@@ -144,70 +127,46 @@ def fetch_feed(url):
 
 
 def local_name(tag):
-    """Извлекает имя XML-тега без пространства имён."""
-    if "}" in tag:
-        return tag.rsplit("}", 1)[1]
-
-    return tag
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
 def child_text(element, names):
-    """Ищет текст дочернего элемента по имени."""
     for child in element.iter():
         if child is element:
             continue
-
         if local_name(child.tag) in names and child.text:
             return child.text.strip()
-
     return ""
 
 
 def atom_link(element):
-    """Извлекает ссылку RSS или Atom."""
     for child in element:
-        if local_name(child.tag) != "link":
-            continue
-
-        href = child.attrib.get("href", "").strip()
-
-        if href:
-            rel = child.attrib.get("rel", "alternate")
-
-            if rel == "alternate":
+        if local_name(child.tag) == "link":
+            href = child.attrib.get("href", "").strip()
+            if href and child.attrib.get("rel", "alternate") == "alternate":
                 return href
-
     return ""
 
 
 def extract_entries(xml_bytes):
-    """Читает RSS items и Atom entries."""
     root = ET.fromstring(xml_bytes)
     entries = []
 
     for element in root.iter():
-        tag = local_name(element.tag)
-
-        if tag not in ("item", "entry"):
+        if local_name(element.tag) not in ("item", "entry"):
             continue
 
-        title = child_text(element, {"title"})
-        link = child_text(element, {"link"})
+        title = clean_text(child_text(element, {"title"}))
+        link = child_text(element, {"link"}).strip()
         published = child_text(
-            element,
-            {"pubDate", "published", "updated", "date"},
+            element, {"pubDate", "published", "updated", "date"}
         )
-        description = child_text(
-            element,
-            {"description", "summary", "content"},
+        description = clean_text(
+            child_text(element, {"description", "summary", "content"})
         )
 
         if not link:
             link = atom_link(element)
-
-        title = clean_text(title)
-        description = clean_text(description)
-        link = link.strip()
 
         if not title or not link:
             continue
@@ -216,26 +175,21 @@ def extract_entries(xml_bytes):
             link = "https:" + link
 
         parsed = urllib.parse.urlparse(link)
-
         if parsed.scheme != "https" or not parsed.netloc:
             continue
 
-        entries.append(
-            {
-                "title": title,
-                "url": link,
-                "published_raw": published,
-                "description": description[:600],
-            }
-        )
+        entries.append({
+            "title": title,
+            "url": link,
+            "published_raw": published,
+            "description": description[:600],
+        })
 
     return entries
 
 
 def collect_feed(feed, now):
-    """Собирает свежие публикации одной ленты."""
     started = time.monotonic()
-
     result = {
         "feed": feed["name"],
         "status": "error",
@@ -248,52 +202,34 @@ def collect_feed(feed, now):
     }
 
     try:
-        url = build_feed_url(feed["query"])
-        xml_bytes = fetch_feed(url)
+        xml_bytes = fetch_feed(build_feed_url(feed["query"]))
         entries = extract_entries(xml_bytes)
 
         result["status"] = "ok"
         result["items_seen"] = len(entries)
-
         cutoff = now - timedelta(hours=WINDOW_HOURS)
         candidates = []
 
         for entry in entries:
             published = parse_date(entry["published_raw"])
 
-            # Не считаем публикацию свежей, если дата неизвестна.
+            # Неизвестная дата — не считаем новость свежей.
             if published is None:
                 continue
-
             if published > now + timedelta(minutes=10):
                 continue
-
             if published < cutoff:
                 continue
 
             entry["published_utc"] = published.isoformat()
             entry["feed"] = feed["name"]
-
             candidates.append(entry)
 
         result["fresh_candidates"] = len(candidates)
-
         return result, candidates
 
     except urllib.error.HTTPError as exc:
         result["http_status"] = exc.code
-        result["error_type"] = type(exc).__name__
-        result["error"] = str(exc)[:500]
-
-    except (
-        urllib.error.URLError,
-        TimeoutError,
-        OSError,
-        ET.ParseError,
-        ValueError,
-        RuntimeError,
-        UnicodeError,
-    ) as exc:
         result["error_type"] = type(exc).__name__
         result["error"] = str(exc)[:500]
 
@@ -310,7 +246,6 @@ def collect_feed(feed, now):
 
 
 def deduplicate(candidates):
-    """Удаляет дубли по URL и нормализованному заголовку."""
     seen_urls = set()
     seen_titles = set()
     unique = []
@@ -322,9 +257,7 @@ def deduplicate(candidates):
     ):
         url = item["url"].split("#", 1)[0].rstrip("/")
         title_key = re.sub(
-            r"[^a-zа-яё0-9]+",
-            "",
-            item["title"].lower(),
+            r"[^a-zа-яё0-9]+", "", item["title"].lower()
         )
 
         if url in seen_urls or title_key in seen_titles:
@@ -332,7 +265,6 @@ def deduplicate(candidates):
 
         seen_urls.add(url)
         seen_titles.add(title_key)
-
         item["url"] = url
         unique.append(item)
 
@@ -356,29 +288,20 @@ def main():
 
         if status["status"] == "ok":
             print(
-                "OK:",
-                feed["name"],
-                "| items:",
-                status["items_seen"],
-                "| fresh:",
-                status["fresh_candidates"],
+                "OK:", feed["name"],
+                "| items:", status["items_seen"],
+                "| fresh:", status["fresh_candidates"],
             )
         else:
             print(
-                "ERROR:",
-                feed["name"],
-                "| type:",
-                status["error_type"],
-                "| details:",
-                status["error"],
+                "ERROR:", feed["name"],
+                "| type:", status["error_type"],
+                "| details:", status["error"],
             )
 
-    unique_candidates = deduplicate(all_candidates)
-    unique_candidates = unique_candidates[:MAX_CANDIDATES]
-
+    unique_candidates = deduplicate(all_candidates)[:MAX_CANDIDATES]
     successful_feeds = sum(
-        1 for item in feed_statuses
-        if item["status"] == "ok"
+        1 for item in feed_statuses if item["status"] == "ok"
     )
 
     report = {
@@ -398,21 +321,27 @@ def main():
         "candidates": unique_candidates,
     }
 
+    try:
+        OUTPUT_FILE.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print()
+        print("JSON file saved:", OUTPUT_FILE.name)
+    except OSError as exc:
+        print(
+            f"ERROR: Could not save JSON report: {exc}",
+            file=sys.stderr,
+        )
+        return 3
+
     print()
     print("JSON REPORT:")
-    print(
-        json.dumps(
-            report,
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
-    # Ошибка выполнения только если не удалось получить ни одной ленты.
     if successful_feeds == 0:
         print(
-            "\nERROR: All RSS feeds failed. "
-            "Check feed_statuses in the report.",
+            "\nERROR: All RSS feeds failed. Check feed_statuses.",
             file=sys.stderr,
         )
         return 2

@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   collect:
-    name: Collect and test news candidates
+    name: Collect, analyze and test news
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -26,43 +26,39 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Show repository and script version
-        shell: bash
+      - name: Check required files
         run: |
           set -eu
-
-          echo "=== BRANCH ==="
-          git branch --show-current
-
-          echo "=== COMMIT ==="
-          git rev-parse HEAD
-
-          echo "=== PYTHON VERSION ==="
-          python --version
-
-          echo "=== REQUIRED FILES ==="
           test -f scripts/check_news.py
           test -f scripts/test_news.py
-          echo "Both Python files exist."
-
-          echo "=== SCRIPT MARKERS ==="
-          grep -nE 'NEWCAR RSS collector|feeds_successful|JSON REPORT:|OUTPUT_FILE' scripts/check_news.py || true
+          test -f scripts/verify_news.py
+          test -f scripts/test_verify_news.py
+          echo "All required files exist."
 
       - name: Check Python syntax
         run: |
-          python -m py_compile scripts/check_news.py scripts/test_news.py
+          python -m py_compile \
+            scripts/check_news.py \
+            scripts/test_news.py \
+            scripts/verify_news.py \
+            scripts/test_verify_news.py
 
       - name: Collect RSS candidates
         run: python scripts/check_news.py
 
       - name: Run automated tests
-        run: python -m unittest discover -s scripts -p "test_news.py" -v
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
 
-      - name: Upload news report
+      - name: Analyze news candidates
+        run: python scripts/verify_news.py
+
+      - name: Upload news reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: newcar-news-report
-          path: news_candidates.json
+          name: newcar-news-reports
+          path: |
+            news_candidates.json
+            news_verification.json
           if-no-files-found: warn
           retention-days: 7

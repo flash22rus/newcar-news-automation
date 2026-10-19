@@ -13,13 +13,18 @@ concurrency:
 
 jobs:
   collect:
-    name: Collect recent news candidates
+    name: Collect and test news candidates
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Show repository and script version
         shell: bash
@@ -33,25 +38,31 @@ jobs:
           git rev-parse HEAD
 
           echo "=== PYTHON VERSION ==="
-          python3 --version
+          python --version
 
-          echo "=== SCRIPT PATH ==="
+          echo "=== REQUIRED FILES ==="
           test -f scripts/check_news.py
-          realpath scripts/check_news.py
+          test -f scripts/test_news.py
+          echo "Both Python files exist."
 
           echo "=== SCRIPT MARKERS ==="
-          grep -nE 'NEWCAR RSS collector|feeds_successful|WARNING: feed unavailable|def collect_feed|JSON REPORT:' scripts/check_news.py || true
-
-          echo "=== FIRST 25 LINES ==="
-          sed -n '1,25p' scripts/check_news.py
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+          grep -nE 'NEWCAR RSS collector|feeds_successful|JSON REPORT:|OUTPUT_FILE' scripts/check_news.py || true
 
       - name: Check Python syntax
-        run: python -m py_compile scripts/check_news.py
+        run: |
+          python -m py_compile scripts/check_news.py scripts/test_news.py
 
       - name: Collect RSS candidates
         run: python scripts/check_news.py
+
+      - name: Run automated tests
+        run: python -m unittest discover -s scripts -p "test_news.py" -v
+
+      - name: Upload news report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newcar-news-report
+          path: news_candidates.json
+          if-no-files-found: warn
+          retention-days: 7

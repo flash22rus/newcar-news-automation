@@ -6,7 +6,7 @@
 import datetime as dt
 import email.utils
 import json
-import urllib.request
+import urllib.request from urllib.parse import quote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
 FEEDS = [
@@ -43,9 +43,21 @@ def parse_date(value):
         return None
 
 
+
 def fetch_feed(name, url):
+    # Кодируем кириллицу в query string для корректного HTTP-запроса.
+    parts = urlsplit(url)
+    safe_query = quote(parts.query, safe="=&%+:/?@!$'()*,-._~")
+    encoded_url = urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        parts.path,
+        safe_query,
+        parts.fragment,
+    ))
+
     request = urllib.request.Request(
-        url,
+        encoded_url,
         headers={"User-Agent": "NEWCAR-NewsResearch/1.0"},
     )
     try:
@@ -53,7 +65,7 @@ def fetch_feed(name, url):
             raw = response.read(2_000_000)
         root = ET.fromstring(raw)
     except Exception as exc:
-        print(f"WARNING: feed unavailable: {name}: {type(exc).__name__}")
+        print(f"WARNING: feed unavailable: {name}: {type(exc).__name__}: {exc}")
         return []
 
     results = []
@@ -69,6 +81,7 @@ def fetch_feed(name, url):
                 "published_at": published.isoformat(),
             })
     return results
+
 
 
 def main():

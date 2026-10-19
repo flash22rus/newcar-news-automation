@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Automated tests for the NEWCAR news analyzer."""
+"""Automated tests for the NEWCAR news analyzer and ranking."""
 
 import importlib.util
 import sys
@@ -30,6 +30,8 @@ class TestNewsAnalyzer(unittest.TestCase):
         self.assertIn("relevance_score", result)
         self.assertIn("matched_categories", result)
         self.assertIn("relevance_label", result)
+        self.assertIn("ranking_reasons", result)
+        self.assertIn("geography", result)
         self.assertGreaterEqual(result["relevance_score"], 0)
         self.assertLessEqual(result["relevance_score"], 100)
 
@@ -40,6 +42,68 @@ class TestNewsAnalyzer(unittest.TestCase):
         })
         self.assertEqual(result["relevance_score"], 0)
         self.assertEqual(result["relevance_label"], "low")
+        self.assertEqual(result["geography"], "unknown")
+
+    def test_russian_recycling_fee_news_ranks_high(self):
+        result = verify_news.score_relevance({
+            "title": "В России изменится утильсбор на автомобили",
+            "description": (
+                "Новые правила ввоза автомобилей повлияют на стоимость "
+                "машин из Японии и Китая."
+            ),
+        })
+        self.assertGreaterEqual(result["relevance_score"], 65)
+        self.assertEqual(result["relevance_label"], "high")
+        self.assertIn("recycling_fee", result["matched_categories"])
+        self.assertEqual(result["geography"], "russia")
+
+    def test_japan_import_news_is_relevant(self):
+        result = verify_news.score_relevance({
+            "title": "Импорт автомобилей из Японии в Россию вырос",
+            "description": "Изменились поставки автомобилей с пробегом.",
+        })
+        self.assertGreaterEqual(result["relevance_score"], 35)
+        self.assertIn("japan", result["matched_categories"])
+        self.assertEqual(result["geography"], "russia")
+
+    def test_china_import_news_is_recognized(self):
+        result = verify_news.score_relevance({
+            "title": "Автомобили из Китая поставляют в Россию",
+            "description": "Изменились условия поставок.",
+        })
+        self.assertIn("china", result["matched_categories"])
+        self.assertEqual(result["geography"], "russia")
+
+    def test_south_korea_import_news_is_recognized(self):
+        result = verify_news.score_relevance({
+            "title": "Автомобили из Южной Кореи в Россию",
+            "description": "Обзор поставок автомобилей.",
+        })
+        self.assertIn("south_korea", result["matched_categories"])
+        self.assertEqual(result["geography"], "russia")
+
+    def test_foreign_domestic_news_gets_penalty(self):
+        result = verify_news.score_relevance({
+            "title": "Утильсбор в Казахстане изменился",
+            "description": (
+                "Новые правила для внутреннего авторынка Казахстана."
+            ),
+        })
+        self.assertIn(
+            "penalty:foreign_domestic_market",
+            result["ranking_reasons"],
+        )
+        self.assertEqual(result["geography"], "uncertain")
+
+    def test_ranking_reasons_are_returned(self):
+        result = verify_news.score_relevance({
+            "title": "Доставка автомобилей из Китая в Россию",
+            "description": "Стоимость доставки увеличилась.",
+        })
+        self.assertIsInstance(result["ranking_reasons"], list)
+        self.assertTrue(result["ranking_reasons"])
+        self.assertGreaterEqual(result["relevance_score"], 0)
+        self.assertLessEqual(result["relevance_score"], 100)
 
     def test_google_news_redirect_is_detected(self):
         self.assertTrue(verify_news.is_google_news_redirect(
@@ -80,6 +144,27 @@ class TestNewsAnalyzer(unittest.TestCase):
 
     def test_empty_input_returns_no_groups(self):
         self.assertEqual(verify_news.build_groups([]), [])
+
+    def test_groups_are_sorted_by_relevance(self):
+        candidates = [
+            {
+                "title": "Новости автомобильного рынка",
+                "url": "https://example.com/low",
+            },
+            {
+                "title": "В России изменится утильсбор на автомобили",
+                "description": (
+                    "Новые правила ввоза автомобилей из Японии и Китая."
+                ),
+                "url": "https://example.com/high",
+            },
+        ]
+        groups = verify_news.build_groups(candidates)
+        self.assertEqual(len(groups), 2)
+        self.assertGreaterEqual(
+            groups[0]["relevance_score"],
+            groups[1]["relevance_score"],
+        )
 
     def test_group_is_not_publication_ready(self):
         groups = verify_news.build_groups([{
@@ -150,11 +235,14 @@ class TestNewsAnalyzer(unittest.TestCase):
             "https://example.com/automotive/news"
         )
         mock_urlopen.return_value = response
+
         result = verify_news.resolve_google_news_url(
             "https://news.google.com/rss/articles/example"
         )
         self.assertTrue(result["resolved"])
-        self.assertEqual(result["url"], "https://example.com/automotive/news")
+        self.assertEqual(
+            result["url"], "https://example.com/automotive/news"
+        )
         self.assertIsNone(result["error"])
 
     @patch.object(verify_news, "urlopen", side_effect=TimeoutError)
@@ -173,6 +261,7 @@ class TestNewsAnalyzer(unittest.TestCase):
             "https://news.google.com/rss/articles/example"
         )
         mock_urlopen.return_value = response
+
         result = verify_news.resolve_google_news_url(
             "https://news.google.com/rss/articles/example"
         )
@@ -198,7 +287,9 @@ class TestNewsAnalyzer(unittest.TestCase):
         self.assertEqual(result["error"], "empty_url")
 
     def test_non_https_publisher_url_is_rejected(self):
-        result = verify_news.resolve_google_news_url("http://example.com/news")
+        result = verify_news.resolve_google_news_url(
+            "http://example.com/news"
+        )
         self.assertFalse(result["resolved"])
         self.assertEqual(result["error"], "invalid_https_url")
 
@@ -212,12 +303,14 @@ class TestNewsAnalyzer(unittest.TestCase):
             "resolved": True,
             "error": None,
         }
+
         groups = verify_news.build_groups([{
             "title": "Импорт автомобилей из Японии в Россию",
             "url": original,
         }])
         stats = verify_news.resolve_group_urls(groups)
         member = groups[0]["members"][0]
+
         self.assertEqual(member["url"], publisher)
         self.assertEqual(member["original_url"], original)
         self.assertFalse(member["source_url_needs_resolution"])
@@ -234,6 +327,7 @@ class TestNewsAnalyzer(unittest.TestCase):
             "resolved": False,
             "error": "network_error",
         }
+
         groups = verify_news.build_groups([{
             "title": "Импорт автомобилей из Японии в Россию",
             "url": original,
@@ -242,6 +336,7 @@ class TestNewsAnalyzer(unittest.TestCase):
         }])
         stats = verify_news.resolve_group_urls(groups)
         member = groups[0]["members"][0]
+
         self.assertEqual(member["url"], original)
         self.assertEqual(member["original_url"], original)
         self.assertTrue(member["source_url_needs_resolution"])

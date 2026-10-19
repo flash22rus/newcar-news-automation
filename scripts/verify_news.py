@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 INPUT_FILE = Path("news_candidates.json")
@@ -157,6 +158,49 @@ def is_google_news_redirect(url: str) -> bool:
         return urlparse(url).hostname in GOOGLE_NEWS_HOSTS
     except ValueError:
         return False
+
+def resolve_google_news_url(url: str, timeout: int = 5) -> dict:
+    """Try to follow a Google News redirect to the publisher URL."""
+    if not is_google_news_redirect(url):
+        return {
+            "original_url": url,
+            "url": url,
+            "resolved": True,
+        }
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; NEWCAR-NewsBot/1.0)",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            final_url = response.geturl()
+
+        parsed = urlparse(final_url)
+
+        if (
+            parsed.scheme == "https"
+            and parsed.netloc
+            and not is_google_news_redirect(final_url)
+        ):
+            return {
+                "original_url": url,
+                "url": final_url,
+                "resolved": True,
+            }
+
+    except Exception:
+        # Network errors and unresolved redirects require manual review.
+        pass
+
+    return {
+        "original_url": url,
+        "url": url,
+        "resolved": False,
+    }
 
 
 def build_groups(candidates: list[dict]) -> list[dict]:

@@ -2,9 +2,10 @@
 #!/usr/bin/env python3
 """NEWCAR news candidate analyzer.
 
-Groups similar headlines, scores relevance to NEWCAR, and prepares a
-manual verification report. This script does NOT verify facts, resolve
-publisher URLs, or publish news.
+Groups similar headlines, estimates topical relevance, attempts to resolve
+Google News redirect URLs, and prepares a report for manual verification.
+
+This script does NOT verify facts or publish news.
 """
 
 from __future__ import annotations
@@ -12,10 +13,10 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -23,9 +24,12 @@ from urllib.request import Request, urlopen
 INPUT_FILE = Path("news_candidates.json")
 OUTPUT_FILE = Path("news_verification.json")
 
-# Headlines with similarity at or above this value are grouped together.
-# This is a heuristic, not proof that two articles describe the same event.
+# Heuristic only. A matching score does not prove that stories describe
+# the same event.
 SIMILARITY_THRESHOLD = 0.72
+
+# Keep network requests bounded so the workflow cannot wait indefinitely.
+URL_RESOLUTION_TIMEOUT = 5
 
 RELEVANCE_TERMS = {
     "russia_import": [
@@ -93,7 +97,7 @@ def headline_tokens(title: str) -> set[str]:
 
 
 def headline_similarity(first: str, second: str) -> float:
-    """Combine character and word overlap into a heuristic score."""
+    """Calculate approximate similarity using character and word overlap."""
     first_normalized = normalize_text(first)
     second_normalized = normalize_text(second)
 
@@ -107,6 +111,7 @@ def headline_similarity(first: str, second: str) -> float:
     first_words = headline_tokens(first)
     second_words = headline_tokens(second)
     union = first_words | second_words
+
     word_score = (
         len(first_words & second_words) / len(union)
         if union
@@ -125,7 +130,7 @@ def get_candidate_text(candidate: dict) -> str:
 
 
 def score_relevance(candidate: dict) -> dict:
-    """Score topical relevance; this does not establish factual accuracy."""
+    """Estimate topical relevance. This is not fact-checking."""
     text = get_candidate_text(candidate)
     matched_categories = []
 
@@ -153,23 +158,34 @@ def score_relevance(candidate: dict) -> dict:
 
 
 def is_google_news_redirect(url: str) -> bool:
-    """Identify Google News links that may need manual URL resolution."""
+    """Return True when a URL uses a Google News hostname."""
     try:
         return urlparse(url).hostname in GOOGLE_NEWS_HOSTS
-    except ValueError:
+    except (TypeError, ValueError):
         return False
 
-def resolve_google_news_url(url: str, timeout: int = 5) -> dict:
-    """Try to follow a Google News redirect to the publisher URL."""
-    if not is_google_news_redirect(url):
+
+def resolve_google_news_url(
+    url: str,
+    timeout: int = URL_RESOLUTION_TIMEOUT,
+) -> dict:
+    """Attempt to follow a Google News URL to its publisher.
+
+    Only an HTTPS destination outside Google News is considered resolved.
+    On failure, the original URL is preserved for manual review.
+    """
+    original_url = str(url or "").strip()
+
+    if not is_google_news_redirect(original_url):
         return {
-            "original_url": url,
-            "url": url,
-            "resolved": True,
+            "original_url": original_url,
+            "url": original_url,
+            "resolved": bool(original_url),
+            "error": None if original_url else "empty_url",
         }
 
     request = Request(
-        url,
+        original_url,
         headers={
             "User-Agent": "Mozilla/5.0 (compatible; NEWCAR-NewsBot/1.0)",
         },
@@ -183,32 +199,42 @@ def resolve_google_news_url(url: str, timeout: int = 5) -> dict:
 
         if (
             parsed.scheme == "https"
-            and parsed.netloc
+            and parsed.hostname
             and not is_google_news_redirect(final_url)
         ):
             return {
-                "original_url": url,
+                "original_url": original_url,
                 "url": final_url,
                 "resolved": True,
+                "error": None,
             }
 
+        error = "redirect_did_not_reach_publisher"
+
+    except HTTPError as exc:
+        error = f"http_error_{exc.code}"
+    except URLError:
+        error = "network_error"
+    except (TimeoutError, OSError):
+        error = "connection_error"
     except Exception:
-        # Network errors and unresolved redirects require manual review.
-        pass
+        # Keep the workflow running if a particular URL cannot be resolved.
+        error = "unexpected_resolution_error"
 
     return {
-        "original_url": url,
-        "url": url,
+        "original_url": original_url,
+        "url": original_url,
         "resolved": False,
+        "error": error,
     }
 
 
 def build_groups(candidates: list[dict]) -> list[dict]:
-    """Group similar headlines using a greedy, explainable heuristic."""
+    """Group similar headlines using a greedy similarity heuristic."""
     groups = []
 
     for candidate in candidates:
-        title = str(candidate.get("title", "")).strip()
+        title = str(candidate.get("title", "") or "").strip()
         if not title:
             title = "(Заголовок отсутствует)"
 
@@ -220,6 +246,7 @@ def build_groups(candidates: list[dict]) -> list[dict]:
                 headline_similarity(title, member["title"])
                 for member in group["members"]
             )
+
             if (
                 similarity >= SIMILARITY_THRESHOLD
                 and similarity > best_similarity
@@ -239,22 +266,27 @@ def build_groups(candidates: list[dict]) -> list[dict]:
     results = []
 
     for index, group in enumerate(groups, start=1):
-        members = group["members"]
         scored_members = []
 
-        for member in members:
+        for member in group["members"]:
             relevance = score_relevance(member)
-            url = str(member.get("url", "") or "")
-            redirect = is_google_news_redirect(url)
+            url = str(member.get("url", "") or "").strip()
 
             scored_members.append({
                 "title": member["title"],
                 "url": url,
-               "published_utc": member.get("published_utc") or member.get("published"),
+                "original_url": url,
+                "published_utc": (
+                    member.get("published_utc")
+                    or member.get("published")
+                ),
                 "description": member.get("description", ""),
                 "feed": member.get("feed", ""),
                 **relevance,
-                "source_url_needs_resolution": redirect,
+                "source_url_needs_resolution": (
+                    is_google_news_redirect(url)
+                ),
+                "url_resolution_error": None,
                 "manual_checks": [
                     "Открыть исходную публикацию и проверить полный текст.",
                     "Проверить дату и фактические утверждения.",
@@ -298,6 +330,37 @@ def build_groups(candidates: list[dict]) -> list[dict]:
     return results
 
 
+def resolve_group_urls(groups: list[dict]) -> dict:
+    """Resolve Google News links in the report without aborting on errors."""
+    resolved_count = 0
+    unresolved_count = 0
+    skipped_count = 0
+
+    for group in groups:
+        for member in group["members"]:
+            if not member["source_url_needs_resolution"]:
+                skipped_count += 1
+                continue
+
+            result = resolve_google_news_url(member["url"])
+
+            member["original_url"] = result["original_url"]
+            member["url"] = result["url"]
+            member["source_url_needs_resolution"] = not result["resolved"]
+            member["url_resolution_error"] = result["error"]
+
+            if result["resolved"]:
+                resolved_count += 1
+            else:
+                unresolved_count += 1
+
+    return {
+        "google_news_redirects_resolved": resolved_count,
+        "google_news_redirects_unresolved": unresolved_count,
+        "non_google_urls_skipped": skipped_count,
+    }
+
+
 def main() -> int:
     if not INPUT_FILE.exists():
         print(f"ERROR: Input file not found: {INPUT_FILE}", file=sys.stderr)
@@ -314,6 +377,10 @@ def main() -> int:
         print(f"ERROR: Cannot read input JSON: {error}", file=sys.stderr)
         return 2
 
+    if not isinstance(report, dict):
+        print("ERROR: Input JSON must be an object.", file=sys.stderr)
+        return 2
+
     candidates = report.get("candidates")
     if not isinstance(candidates, list):
         print(
@@ -324,16 +391,14 @@ def main() -> int:
 
     groups = build_groups(candidates)
 
+    # Resolve links only here, not in build_groups(), so unit tests and
+    # grouping remain deterministic and do not need network access.
+    url_stats = resolve_group_urls(groups)
+
     generated_at = datetime.now(timezone.utc).isoformat()
     total_articles = sum(group["article_count"] for group in groups)
     high_relevance = sum(
         1 for group in groups if group["relevance_score"] >= 54
-    )
-    needs_url_resolution = sum(
-        1
-        for group in groups
-        for item in group["members"]
-        if item["source_url_needs_resolution"]
     )
 
     output = {
@@ -345,7 +410,7 @@ def main() -> int:
         "group_count": len(groups),
         "article_count_after_grouping": total_articles,
         "high_relevance_group_count": high_relevance,
-        "google_news_redirect_count": needs_url_resolution,
+        **url_stats,
         "publication_ready": False,
         "automatic_fact_checking_performed": False,
         "independent_sources_verified": False,
@@ -353,7 +418,7 @@ def main() -> int:
             "Similarity grouping is heuristic and can merge unrelated stories.",
             "Different headlines in one group are not proof of the same event.",
             "Relevance scores are keyword-based and may be wrong.",
-            "Google News redirect links may require manual source resolution.",
+            "Unresolved Google News links require manual source resolution.",
             "No facts or independent sources have been verified.",
             "Every group requires human review before use or publication.",
         ],
@@ -373,7 +438,15 @@ def main() -> int:
     print(f"Headline groups: {len(groups)}")
     print(f"Articles retained in groups: {total_articles}")
     print(f"High-relevance groups (heuristic): {high_relevance}")
-    print(f"Google News redirects to resolve: {needs_url_resolution}")
+    print(
+        "Google News redirects resolved: "
+        f"{url_stats['google_news_redirects_resolved']}"
+    )
+    print(
+        "Google News redirects unresolved: "
+        f"{url_stats['google_news_redirects_unresolved']}"
+    )
+    print(f"Non-Google URLs skipped: {url_stats['non_google_urls_skipped']}")
     print(f"JSON report: {OUTPUT_FILE}")
     print("Publication ready: false")
     print("Fact-checking performed: false")

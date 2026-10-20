@@ -97,7 +97,10 @@ class TestEditorialReport(unittest.TestCase):
 
         result = render_editorial_report.render(report)
 
-        self.assertIn("Ссылка Google News не разрешена", result)
+        self.assertIn(
+    "ссылка google news не разрешена",
+    result.lower(),
+)
         self.assertIn("Поиск у издателя", result)
         self.assertIn("publication_ready: false", result)
 

@@ -37,6 +37,95 @@ class ChannelDraftsTests(unittest.TestCase):
             state_directory.rmdir()
         self.assertEqual(set(loaded["entries"]), {"https://recent.example/news"})
 
+    def test_partial_channel_failure_resumes_without_regenerating_content(self):
+        test_directory = Path(__file__).resolve().parent / ".test-partial-retry"
+        state_path = test_directory / "state" / "drafts.json"
+        report_path = test_directory / "news_verification.json"
+        output_path = test_directory / "channel_drafts.json"
+        test_directory.mkdir(exist_ok=True)
+        report_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
+        copy = {
+            "title": "Проверка новой модели для российского рынка",
+            "telegram_text": "Опубликованы сведения о новой модели.",
+            "instagram_text": "Вышла новая модель для российского рынка.",
+            "image_prompt": "Автомобиль на тестовой площадке",
+            "key_facts": [{"fact": "Представлена новая модель"}],
+        }
+        source = "https://primary.example/news"
+        channel_sources = [source] + [f"https://source{i}.example/news" for i in range(1, 4)]
+        telegram_initial = {"status": "pending", "draft_id": "draft-1", "duplicate": False}
+        telegram_duplicate = {"status": "pending", "draft_id": "draft-1", "duplicate": True}
+        instagram = {"status": "draft", "id": "ig-1", "auto_publish": False}
+        required_env = {
+            "NEWCAR_CREATE_DRAFTS": "true",
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_TEXT_MODEL": "test-text",
+            "OPENAI_IMAGE_MODEL": "test-image",
+            "TELEGRAM_WORKER_URL": "https://worker.example/newsdraft",
+            "TELEGRAM_WORKER_SECRET": "test-secret",
+            "METRICOOL_API_TOKEN": "test-metricool",
+            "METRICOOL_USER_ID": "test-user",
+            "METRICOOL_BLOG_ID": "test-brand",
+            "R2_ACCOUNT_ID": "test-account",
+            "R2_BUCKET": "test-bucket",
+            "R2_ACCESS_KEY_ID": "test-access",
+            "R2_SECRET_ACCESS_KEY": "test-r2-secret",
+            "R2_PUBLIC_BASE_URL": "https://cdn.example",
+            "NEWCAR_MIN_RELEVANCE": "75",
+            "NEWCAR_MAX_DRAFTS": "3",
+        }
+        load_state = channel_drafts.load_publication_state
+        save_state = channel_drafts.save_publication_state
+        try:
+            with (
+                patch.object(channel_drafts, "REPORT_FILE", report_path),
+                patch.object(channel_drafts, "OUTPUT_FILE", output_path),
+                patch.object(channel_drafts, "STATE_FILE", state_path),
+                patch.object(channel_drafts, "load_publication_state", side_effect=lambda: load_state(state_path)),
+                patch.object(channel_drafts, "save_publication_state", side_effect=lambda state: save_state(state, path=state_path)),
+                patch.object(channel_drafts, "choose_groups", return_value=[{
+                    "title": copy["title"],
+                    "members": [{"url": source}],
+                }]),
+                patch.object(channel_drafts, "generate_copy", return_value=(copy, [])) as generate_copy,
+                patch.object(channel_drafts, "source_urls_for", return_value=channel_sources),
+                patch.object(channel_drafts, "generate_image", return_value=b"image"),
+                patch.object(channel_drafts, "upload_r2", return_value="https://cdn.example/news.png"),
+                patch.object(channel_drafts, "verify_public_image_url", side_effect=lambda url: url),
+                patch.object(
+                    channel_drafts, "send_telegram_draft",
+                    side_effect=[telegram_initial, telegram_duplicate],
+                ) as send_telegram,
+                patch.object(
+                    channel_drafts, "create_metricool_draft",
+                    side_effect=[channel_drafts.PipelineError("temporary Metricool failure"), instagram],
+                ) as create_instagram,
+                patch.dict("os.environ", required_env, clear=True),
+            ):
+                self.assertEqual(channel_drafts.main(), 1)
+                first_state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(first_state["entries"][source]["telegram"], telegram_initial)
+                self.assertNotIn("instagram", first_state["entries"][source])
+
+                self.assertEqual(channel_drafts.main(), 0)
+                final_state = json.loads(state_path.read_text(encoding="utf-8"))
+                output = json.loads(output_path.read_text(encoding="utf-8"))
+        finally:
+            for path in (report_path, output_path, state_path, state_path.with_name(state_path.name + ".tmp")):
+                path.unlink(missing_ok=True)
+            if state_path.parent.exists():
+                state_path.parent.rmdir()
+            if test_directory.exists():
+                test_directory.rmdir()
+
+        self.assertEqual(generate_copy.call_count, 1)
+        self.assertEqual(send_telegram.call_count, 2)
+        self.assertEqual(create_instagram.call_count, 2)
+        self.assertEqual(final_state["entries"][source]["instagram"], instagram)
+        self.assertEqual(output["drafts"][0]["status"], "drafts_created")
+        self.assertFalse(output["publication_ready"])
+        self.assertFalse(output["fact_checking_complete"])
+
     def test_responses_api_text_is_extracted_from_raw_output_items(self):
         response = {
             "output": [{

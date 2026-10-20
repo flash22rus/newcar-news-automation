@@ -87,7 +87,7 @@ def source_urls_for(group, web_sources):
     return selected
 
 
-def choose_groups(report, minimum_score=65, limit=3):
+def choose_groups(report, minimum_score=75, limit=3):
     """Only high relevance groups with resolved, direct HTTPS sources qualify."""
     chosen = []
     for group in report.get("groups", []):
@@ -118,8 +118,23 @@ def _response_sources(response):
     return found
 
 
+def _response_text(response):
+    """Read raw Responses API output, while accepting SDK-style test fixtures."""
+    convenience_text = response.get("output_text")
+    if convenience_text:
+        return convenience_text
+    parts = []
+    for item in response.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                parts.append(content.get("text") or "")
+    return "\n".join(part for part in parts if part)
+
+
 def validate_fact_evidence(facts, sources):
-    """Require each machine-drafted fact to point to a returned web result."""
+    """Require two distinct returned publishers for every machine-drafted fact."""
     known = set(sources)
     if not isinstance(facts, list) or len(facts) < 2:
         raise PipelineError("Для черновика нужны минимум два факта с источниками")
@@ -128,7 +143,11 @@ def validate_fact_evidence(facts, sources):
             raise PipelineError("Факт должен содержать текст и ссылки на источники")
         links = fact.get("source_urls")
         if not isinstance(links, list) or not links or not all(url in known for url in links):
-            raise PipelineError("Факт не связан с найденным веб-поиском источником")
+            raise PipelineError("Факт не связан с найденными веб-поиском источниками")
+        domains = {publisher_key(url) for url in links}
+        domains.discard("")
+        if len(domains) < 2:
+            raise PipelineError("Каждый факт должен подтверждаться минимум двумя независимыми издателями")
     return facts
 
 
@@ -150,7 +169,8 @@ def generate_copy(api_key, model, group):
                 "Все тексты и факты выдай на русском языке. "
                 "Используй веб-поиск, не выдумывай цифры и даты. Подготовь JSON с "
                 "title, telegram_text, instagram_text, image_prompt, key_facts. "
-                "Для каждого key_fact добавь source_urls только из результатов веб-поиска. "
+                "Для каждого key_fact добавь минимум два source_urls разных издателей, "
+                "только из результатов веб-поиска. В тексты включай только факты из key_facts. "
                 "В тексте укажи, что требует проверки, если данные расходятся. "
                 "Оригинальная новость: " + title + "\n" +
                 "Материалы: " + json.dumps(group.get("members", []), ensure_ascii=False)
@@ -178,7 +198,7 @@ def generate_copy(api_key, model, group):
             }},
         },
     )
-    output_text = response.get("output_text") or ""
+    output_text = _response_text(response)
     try:
         copy = json.loads(output_text)
     except json.JSONDecodeError:

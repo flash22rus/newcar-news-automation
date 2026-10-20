@@ -44,8 +44,6 @@
 | Secret | `TELEGRAM_WORKER_URL` | HTTPS endpoint NEWCAR News Draft 2.0 |
 | Secret | `TELEGRAM_WORKER_SECRET` | Секрет заголовка Worker `X-NEWCAR-SECRET` |
 | Secret | `METRICOOL_API_TOKEN` | Metricool API token; доступ API зависит от плана аккаунта |
-| Variable | `METRICOOL_USER_ID` | Идентификатор пользователя Metricool |
-| Variable | `METRICOOL_BLOG_ID` | ID бренда NEWCAR в Metricool |
 | Variable | `NEWCAR_ENABLE_DRAFT_PIPELINE` | Только значение `true` включает ежедневное создание черновиков |
 | Secret | `R2_ACCOUNT_ID` | Cloudflare account ID |
 | Variable | `R2_BUCKET` | Bucket для изображений |
@@ -53,7 +51,7 @@
 | Secret | `R2_SECRET_ACCESS_KEY` | S3 secret key для Cloudflare R2 |
 | Variable | `R2_PUBLIC_BASE_URL` | Постоянный публичный HTTPS-домен bucket |
 
-Опция создания черновиков в workflow по умолчанию выключена. Ручной флажок `create_drafts` создаёт только ожидающие записи Telegram и Instagram Draft. Чтобы включить такой же ежедневный draft-проход, после добавления и проверки всех credentials установите Actions Variable `NEWCAR_ENABLE_DRAFT_PIPELINE=true`. Публикация не запускается. Новость проходит к генерации только при рейтинге не ниже 75/100 и наличии прямых HTTPS источников.
+Metricool уже настроен на бренд `newcar.import` (`userId=5673565`, `blogId=7315448`, часовой пояс `Asia/Barnaul`). Опция создания черновиков в workflow по умолчанию выключена. Ручной флажок `create_drafts` создаёт только ожидающие записи Telegram и Instagram Draft. Чтобы включить такой же ежедневный draft-проход, после добавления и проверки всех credentials установите Actions Variable `NEWCAR_ENABLE_DRAFT_PIPELINE=true`. Публикация не запускается. Новость проходит к генерации только при рейтинге не ниже 75/100, четырёх прямых HTTPS ссылках, а каждый ключевой факт должен ссылаться минимум на два издателя.
 
 Секреты интеграций должны храниться в GitHub Actions Secrets. Включать отправку и публикацию можно только после проверки полного цикла и защиты от дублей/повторного запуска.
 

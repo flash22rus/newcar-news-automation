@@ -78,8 +78,8 @@ jobs:
           TELEGRAM_WORKER_URL: ${{ secrets.TELEGRAM_WORKER_URL }}
           TELEGRAM_WORKER_SECRET: ${{ secrets.TELEGRAM_WORKER_SECRET }}
           METRICOOL_API_TOKEN: ${{ secrets.METRICOOL_API_TOKEN }}
-          METRICOOL_USER_ID: ${{ vars.METRICOOL_USER_ID }}
-          METRICOOL_BLOG_ID: ${{ vars.METRICOOL_BLOG_ID }}
+          METRICOOL_USER_ID: "5673565"
+          METRICOOL_BLOG_ID: "7315448"
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ vars.R2_BUCKET }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

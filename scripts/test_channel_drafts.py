@@ -5,9 +5,28 @@ import channel_drafts
 
 
 class ChannelDraftsTests(unittest.TestCase):
+    def test_responses_api_text_is_extracted_from_raw_output_items(self):
+        response = {
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": '{"title":"Заголовок"}'}],
+            }],
+        }
+        self.assertEqual(channel_drafts._response_text(response), '{"title":"Заголовок"}')
+
+    def test_response_web_search_sources_are_extracted_from_action(self):
+        response = {
+            "output": [{
+                "type": "web_search_call",
+                "action": {"sources": [{"type": "url", "url": "https://one.example/news"}]},
+            }],
+        }
+        self.assertEqual(channel_drafts._response_sources(response), ["https://one.example/news"])
+
     def test_only_high_score_groups_with_resolved_direct_sources_are_selected(self):
         groups = [
             {"title": "medium", "relevance_score": 64, "members": [{"url": "https://a.example/x"}]},
+            {"title": "threshold", "relevance_score": 74, "members": [{"url": "https://b.example/x"}]},
             {"title": "unresolved", "relevance_score": 90, "members": [{"url": "https://news.google.com/rss/x", "source_url_needs_resolution": True}]},
             {"title": "ready", "relevance_score": 80, "members": [{"url": "https://a.example/x"}]},
         ]
@@ -35,13 +54,30 @@ class ChannelDraftsTests(unittest.TestCase):
             ])
 
     def test_fact_evidence_must_reference_a_web_search_result(self):
-        result_urls = ["https://publisher.example/news"]
+        result_urls = ["https://publisher.example/news", "https://second.example/news"]
         facts = [
             {"fact": "Подтверждённое событие", "source_urls": result_urls},
             {"fact": "Ещё один факт", "source_urls": ["https://unknown.example/news"]},
         ]
         with self.assertRaisesRegex(channel_drafts.PipelineError, "не связан"):
             channel_drafts.validate_fact_evidence(facts, result_urls)
+
+    def test_fact_evidence_needs_two_independent_publishers(self):
+        sources = ["https://one.example/story", "https://two.example/story"]
+        facts = [
+            {"fact": "Событие", "source_urls": sources},
+            {"fact": "Второй факт", "source_urls": sources},
+        ]
+        self.assertEqual(channel_drafts.validate_fact_evidence(facts, sources), facts)
+
+    def test_fact_evidence_rejects_two_urls_from_same_publisher(self):
+        sources = ["https://one.example/story-a", "https://www.one.example/story-b"]
+        facts = [
+            {"fact": "Событие", "source_urls": sources},
+            {"fact": "Второй факт", "source_urls": sources},
+        ]
+        with self.assertRaisesRegex(channel_drafts.PipelineError, "двумя независимыми"):
+            channel_drafts.validate_fact_evidence(facts, sources)
 
     def test_worker_text_contains_exactly_three_additional_sources(self):
         copy = {"telegram_text": "Проверяемая новость."}

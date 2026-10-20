@@ -14,21 +14,46 @@
 
 ## Что реализовано сейчас
 
-- GitHub Actions запускается вручную через `workflow_dispatch`.
+- GitHub Actions ежедневно собирает кандидатов в 12:00 по Барнаулу и поддерживает ручной запуск; создание черновиков включается отдельно.
 - Сборщик получает RSS и отбирает публикации за 24 часа.
 - Анализатор оценивает релевантность и исключает иностранные внутренние авторынки.
 - Похожие заголовки собираются в группы; ссылки и данные издателей сохраняются.
 - Google News ссылки раскрываются до страницы издателя, если это удаётся.
 - Формируются JSON-отчёт и редакционный Markdown-отчёт.
-- Автоматическая отправка и публикация не выполняются: `publication_ready=false`, `fact_checking_complete=false`.
+- При отдельном включении чернового этапа создаются тексты через OpenAI Responses API с веб-поиском, изображение NEWCAR через Images API и загружается в Cloudflare R2.
+- Telegram получает черновик через NEWCAR News Draft 2.0 Worker; Worker создаёт карточку с обязательным подтверждением администратора.
+- Instagram получает запись в статусе Draft через Metricool; изображение передаётся через нормализацию media URL.
+- На этом этапе `publication_ready=false` и `fact_checking_complete=false`; публикация/автопубликация выключены.
 
 ## Что ещё требуется для полного запуска
 
-1. Проверка текста статей, первоисточников и двух независимых подтверждений.
-2. Генератор редакционного текста и изображения, включая хранение доступного Telegram и Metricool медиа.
-3. Контракт Worker NEWCAR News Draft 2.0: endpoint, схема запроса и авторизация. Worker должен создавать черновик в существующем боте без обхода CRM, KV и согласованного сценария.
-4. Интеграция с Metricool или надёжная связь GitHub Actions с существующей автоматизацией Codex.
-5. Сквозная проверка обоих каналов на тестовом материале и отдельная настройка расписания.
+1. Настроить GitHub Secrets/Variables по таблице ниже и проверить разрешения API.
+2. Провести сквозной запуск в режиме draft и убедиться, что карточка Telegram и Instagram Draft созданы с изображением.
+3. Проверить правила источников, тексты, стиль изображения, повторные запуски и восстановление после частичного сбоя.
+4. Если потребуется автопубликация, отдельно реализовать и проверить явное одобрение фактов, планировщик, защиту от повторов и переключатель разрешения публикации. Сейчас публикация отключена.
+
+### Настройка интеграций
+
+Заполнять значения нужно в **Settings → Secrets and variables → Actions**. Сами токены не вставляйте в репозиторий или отчёты.
+
+| Тип | Имя | Назначение |
+|---|---|---|
+| Secret | `OPENAI_API_KEY` | OpenAI Responses API и генерация изображения |
+| Variable | `OPENAI_TEXT_MODEL` | Модель для редакционного текста и веб-поиска |
+| Variable | `OPENAI_IMAGE_MODEL` | Модель генерации изображения |
+| Secret | `TELEGRAM_WORKER_URL` | HTTPS endpoint NEWCAR News Draft 2.0 |
+| Secret | `TELEGRAM_WORKER_SECRET` | Секрет заголовка Worker `X-NEWCAR-SECRET` |
+| Secret | `METRICOOL_API_TOKEN` | Metricool API token; доступ API зависит от плана аккаунта |
+| Variable | `METRICOOL_USER_ID` | Идентификатор пользователя Metricool |
+| Variable | `METRICOOL_BLOG_ID` | ID бренда NEWCAR в Metricool |
+| Variable | `NEWCAR_ENABLE_DRAFT_PIPELINE` | Только значение `true` включает ежедневное создание черновиков |
+| Secret | `R2_ACCOUNT_ID` | Cloudflare account ID |
+| Variable | `R2_BUCKET` | Bucket для изображений |
+| Secret | `R2_ACCESS_KEY_ID` | S3 access key для Cloudflare R2 |
+| Secret | `R2_SECRET_ACCESS_KEY` | S3 secret key для Cloudflare R2 |
+| Variable | `R2_PUBLIC_BASE_URL` | Постоянный публичный HTTPS-домен bucket |
+
+Опция создания черновиков в workflow по умолчанию выключена. Ручной флажок `create_drafts` создаёт только ожидающие записи Telegram и Instagram Draft. Чтобы включить такой же ежедневный draft-проход, после добавления и проверки всех credentials установите Actions Variable `NEWCAR_ENABLE_DRAFT_PIPELINE=true`. Публикация не запускается. Новость проходит к генерации только при рейтинге не ниже 75/100 и наличии прямых HTTPS источников.
 
 Секреты интеграций должны храниться в GitHub Actions Secrets. Включать отправку и публикацию можно только после проверки полного цикла и защиты от дублей/повторного запуска.
 
@@ -39,19 +64,20 @@
 scripts/check_news.py               Сбор RSS и фильтр свежести
 scripts/verify_news.py              Релевантность, фильтры, группировка, ссылки
 scripts/render_editorial_report.py  Редакционный Markdown-отчёт
+scripts/channel_drafts.py          OpenAI/R2/Telegram Worker/Metricool draft интеграции
 scripts/test_*.py                   Регрессионные тесты
 IMPLEMENTATION.md                   Состояние интеграций и критерии завершения
 ```
 
 ## Запуск и проверки
 
-В GitHub открой **Actions → NEWCAR Daily News → Run workflow**. Запуск создаёт артефакт `newcar-news-reports`; успешный workflow означает, что сбор и проверки завершились, но не означает, что публикация разрешена.
+В GitHub открой **Actions → NEWCAR Daily News → Run workflow**. По умолчанию запуск создаёт только отчёты. Включение `Create NEWCAR drafts in Telegram and Instagram` запускает отдельный этап draft-only, который требует все перечисленные Secrets/Variables. Артефакт `newcar-news-reports` содержит отчёты и статус по каждому черновику.
 
 Локальные проверки:
 
 ```bash
 python -m unittest discover -s scripts -p "test_*.py" -v
-python -m py_compile scripts/check_news.py scripts/test_news.py scripts/verify_news.py scripts/test_verify_news.py scripts/render_editorial_report.py scripts/test_render_editorial_report.py
+python -m py_compile scripts/*.py
 ```
 
 ## Ограничения и безопасность

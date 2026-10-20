@@ -1,1 +1,2 @@
-googlenewsdecoder==0.2.1
+googlenewsdecoder==0.2.2
+boto3>=1.34,<2

@@ -260,6 +260,75 @@ class TestNewsAnalyzer(unittest.TestCase):
 
  
 
+    def test_foreign_domestic_markets_are_excluded_from_groups(self):
+        candidates = [
+            {"title": "В Узбекистане дешевеют автомобили: цены на авторынке", "url": "https://example.com/uz"},
+            {"title": "В Казахстане вырос утильсбор: новости авторынка", "url": "https://example.com/kz"},
+            {"title": "Поставки автомобилей из Китая в Украину сократились", "url": "https://example.com/ua"},
+            {"title": "В России изменится утильсбор на автомобили", "url": "https://example.com/ru"},
+        ]
+        groups = verify_news.build_groups(candidates)
+        self.assertEqual([group["title"] for group in groups], [candidates[-1]["title"]])
+
+
+    def test_related_headlines_group_and_preserve_independent_sources(self):
+        candidates = [
+            {"title": "В России изменится утильсбор на автомобили с 1 января", "url": "https://one.example/news/1", "source_name": "Первое издание"},
+            {"title": "Утильсбор на автомобили в России изменится с 1 января", "url": "https://two.example/news/2", "source_name": "Второе издание"},
+        ]
+        groups = verify_news.build_groups(candidates)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]["members"]), 2)
+        self.assertEqual(groups[0]["source_count"], 2)
+        self.assertEqual(
+            {member["source_name"] for member in groups[0]["members"]},
+            {"Первое издание", "Второе издание"},
+        )
+
+    def test_source_count_uses_publisher_domain_when_available(self):
+        candidates = [
+            {"title": "В России изменится утильсбор на автомобили с 1 января", "url": "https://one.example/news/1", "source_name": "Первое название", "source_url": "https://publisher.example/"},
+            {"title": "Утильсбор на автомобили в России изменится с 1 января", "url": "https://publisher.example/news/2", "source_name": "Другое название", "source_url": "https://publisher.example/"},
+        ]
+        groups = verify_news.build_groups(candidates)
+        self.assertEqual(groups[0]["source_count"], 1)
+
+    def test_grouping_stats_report_exclusions_and_grouped_articles(self):
+        stats = {}
+        candidates = [
+            {"title": "В России изменится утильсбор на автомобили с 1 января", "url": "https://one.example/news/1"},
+            {"title": "Утильсбор на автомобили в России изменится с 1 января", "url": "https://two.example/news/2"},
+            {"title": "Авторынок Узбекистана вырос", "url": "https://foreign.example/news"},
+        ]
+        verify_news.build_groups(candidates, stats=stats)
+        self.assertEqual(stats["foreign_domestic_market_excluded"], 1)
+        self.assertEqual(stats["duplicate_articles_grouped_or_skipped"], 1)
+
+    def test_group_ranking_uses_best_member_and_union_of_topics(self):
+        title = "Импорт автомобилей из Японии в Россию вырос в январе"
+        candidates = [
+            {"title": title, "url": "https://one.example/news/1"},
+            {
+                "title": title,
+                "description": "Введут новые правила ввоза и увеличится утильсбор.",
+                "url": "https://two.example/news/2",
+            },
+        ]
+        groups = verify_news.build_groups(candidates)
+        member_scores = [member["relevance_score"] for member in groups[0]["members"]]
+        self.assertEqual(groups[0]["relevance_score"], max(member_scores))
+        self.assertEqual(groups[0]["relevance_label"], "high")
+        self.assertIn("recycling_fee", groups[0]["matched_categories"])
+
+
+    def test_thresholds_keep_single_topic_import_news_medium(self):
+        result = verify_news.score_relevance({
+            "title": "Автомобили из Китая поставляют в Россию",
+        })
+        self.assertEqual(result["relevance_score"], 46)
+        self.assertEqual(result["relevance_label"], "medium")
+
+
     def test_ranking_reasons_are_returned(self):
 
         result = verify_news.score_relevance({

@@ -19,7 +19,7 @@ from html import unescape
 from pathlib import Path
 
 
-WINDOW_HOURS = 36
+WINDOW_HOURS = 24
 MAX_CANDIDATES = 40
 TIMEOUT_SECONDS = 15
 OUTPUT_FILE = Path(__file__).resolve().parent.parent / "news_candidates.json"

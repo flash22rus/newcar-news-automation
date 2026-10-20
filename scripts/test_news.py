@@ -24,7 +24,7 @@ spec.loader.exec_module(check_news)
 class TestNewsCollector(unittest.TestCase):
 
     def test_configuration(self):
-        self.assertEqual(check_news.WINDOW_HOURS, 36)
+        self.assertEqual(check_news.WINDOW_HOURS, 24)
         self.assertEqual(check_news.MAX_CANDIDATES, 40)
         self.assertEqual(len(check_news.FEEDS), 9)
 

@@ -47,6 +47,7 @@ class TestEditorialReport(unittest.TestCase):
                     "title": "Импорт автомобилей из Японии",
                     "relevance_score": 85,
                     "relevance_label": "high",
+                    "source_count": 2,
                     "members": [
                         {
                             "title": "Импорт автомобилей из Японии",
@@ -55,7 +56,13 @@ class TestEditorialReport(unittest.TestCase):
                             "url": "https://example.com/news/123",
                             "verification_status":
                                 "needs_manual_verification",
-                        }
+                        },
+                        {
+                            "title": "Импорт автомобилей из Японии",
+                            "source_name": "Второе издание",
+                            "published_utc": "2026-10-19T21:00:00+00:00",
+                            "url": "https://other.example/news/456",
+                        },
                     ],
                 }
             ],
@@ -66,6 +73,8 @@ class TestEditorialReport(unittest.TestCase):
         self.assertIn("Импорт автомобилей из Японии", result)
         self.assertIn("Пример издания", result)
         self.assertIn("https://example.com/news/123", result)
+        self.assertIn("https://other.example/news/456", result)
+        self.assertIn("изданий: 2", result)
         self.assertIn("85/100", result)
         self.assertIn("needs_manual_verification", result)
 

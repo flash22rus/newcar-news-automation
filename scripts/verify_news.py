@@ -289,17 +289,56 @@ UKRAINE_EXCLUSION_TERMS = [
 
  
 
+FOREIGN_MARKET_COUNTRIES = [
+    "казахстан", "узбекистан", "украина", "украине", "украины", "украину",
+    "беларусь", "беларуси", "белоруссия", "белоруссии",
+    "азербайджан", "азербайджане", "азербайджана",
+]
+
+FOREIGN_MARKET_CUES = [
+    "авторынок", "авторынке", "рынок автомобилей", "рынке автомобилей",
+    "автомобильный рынок", "внутренний рынок", "внутреннего рынка",
+    "цены на автомобили", "утильсбор", "поставки автомобилей в",
+    "импорт автомобилей в", "автомобилей в",
+]
+
+TITLE_STOP_WORDS = {
+    "автомобиль", "автомобиля", "автомобилей", "автомобили", "машины",
+    "машин", "авто", "в", "на", "из", "для", "и", "по", "с",
+    "изменились", "изменится", "вырос", "выросли", "сократились",
+    "подорожали", "дешевеют",
+}
+
+
 def is_excluded_news(candidate):
-
-    """Exclude stories whose headline mentions Ukraine or Ukrainian topics."""
-
+    """Exclude foreign domestic-market stories from the Russian main feed."""
     title = str(candidate.get("title") or "").casefold()
+    description = str(candidate.get("description") or "").casefold()
+    text = f"{title} {description}"
+    if any(term in title for term in UKRAINE_EXCLUSION_TERMS):
+        return True
+    foreign_market = (
+        any(country in text for country in FOREIGN_MARKET_COUNTRIES)
+        and any(cue in text for cue in FOREIGN_MARKET_CUES)
+    )
+    has_russian_context = any(term in text for term in RUSSIAN_CONTEXT_TERMS)
+    return foreign_market and not has_russian_context
 
-    return any(term in title for term in UKRAINE_EXCLUSION_TERMS)
 
- 
+def normalized_title_tokens(title):
+    words = re.findall(r"[a-zа-яё0-9]+", str(title or "").casefold())
+    return {word for word in words if len(word) > 2 and word not in TITLE_STOP_WORDS}
 
- 
+
+def titles_are_near_duplicates(first, second):
+    """Catch headlines with small wording changes about the same event."""
+    first_tokens = normalized_title_tokens(first)
+    second_tokens = normalized_title_tokens(second)
+    if not first_tokens or not second_tokens:
+        return False
+    shared = first_tokens & second_tokens
+    return len(shared) >= 3 and len(shared) / len(first_tokens | second_tokens) >= 0.72
+
 
 ACTION_TERMS = [
 
@@ -535,7 +574,7 @@ def score_relevance(candidate):
 
     score = max(0, min(100, score))
 
-    label = "high" if score >= 65 else "medium" if score >= 35 else "low"
+    label = "high" if score >= 75 else "medium" if score >= 45 else "low"
 
  
 
@@ -631,107 +670,99 @@ def normalize_member(candidate):
 
  
 
-def build_groups(candidates):
+def build_groups(candidates, stats=None):
+    def publisher_identity(item):
+        for value in (item.get("source_url"), item.get("url")):
+            host = (urlparse(value or "").hostname or "").casefold()
+            if host and host not in {"news.google.com", "www.google.com"}:
+                return host.removeprefix("www.")
+        return (item.get("source_name") or "неизвестный источник").casefold()
 
     groups = []
-
     seen_urls = set()
-
-    seen_titles = set()
-
-    excluded_ukraine_count = 0
-
- 
+    excluded_foreign_market_count = 0
+    duplicate_article_count = 0
 
     for candidate in candidates or []:
-
         if is_excluded_news(candidate):
-
-            excluded_ukraine_count += 1
-
+            excluded_foreign_market_count += 1
             continue
 
         member = normalize_member(candidate)
-
-        title_key = re.sub(
-
-            r"\s+", " ", member["title"].lower()
-
-        ).strip()
-
-        url_key = member["url"].lower().split("#", 1)[0].rstrip("/")
-
- 
+        title_key = re.sub(r"\s+", " ", member["title"].casefold()).strip()
+        url_key = member["url"].casefold().split("#", 1)[0].rstrip("/")
 
         if not title_key and not url_key:
-
             continue
-
         if url_key and url_key in seen_urls:
-
+            duplicate_article_count += 1
             continue
 
-        if title_key and title_key in seen_titles:
-
-            continue
-
- 
+        matching_group = next((
+            group for group in groups
+            if title_key and any(
+                titles_are_near_duplicates(title_key, previous)
+                for previous in group["_title_keys"]
+            )
+        ), None)
 
         if url_key:
-
             seen_urls.add(url_key)
 
-        if title_key:
-
-            seen_titles.add(title_key)
-
- 
+        if matching_group:
+            matching_group["members"].append(member)
+            matching_group["_title_keys"].append(title_key)
+            if member["relevance_score"] > matching_group["relevance_score"]:
+                matching_group["relevance_score"] = member["relevance_score"]
+                matching_group["relevance_label"] = member["relevance_label"]
+            matching_group["matched_categories"] = sorted(set(
+                matching_group["matched_categories"]
+                + member["matched_categories"]
+            ))
+            matching_group["ranking_reasons"] = list(dict.fromkeys(
+                matching_group["ranking_reasons"] + member["ranking_reasons"]
+            ))
+            if member["geography"] == "russia":
+                matching_group["geography"] = "russia"
+            matching_group["source_count"] = len({
+                publisher_identity(item)
+                for item in matching_group["members"]
+            })
+            duplicate_article_count += 1
+            continue
 
         groups.append({
-
             "title": member["title"],
-
             "relevance_score": member["relevance_score"],
-
             "relevance_label": member["relevance_label"],
-
             "matched_categories": member["matched_categories"],
-
             "ranking_reasons": member["ranking_reasons"],
-
             "geography": member["geography"],
-
             "members": [member],
-
+            "source_count": 1,
+            "_title_keys": [title_key] if title_key else [],
             "verification_status": "needs_manual_verification",
-
             "publication_ready": False,
-
         })
 
- 
-
     groups.sort(
-
         key=lambda group: (
-
             group["relevance_score"],
-
             group["members"][0].get("published_utc", ""),
-
         ),
-
         reverse=True,
-
     )
+    for group in groups:
+        group.pop("_title_keys", None)
 
-    print(f"Ukraine-related headlines excluded: {excluded_ukraine_count}")
+    if stats is not None:
+        stats.update({
+            "foreign_domestic_market_excluded": excluded_foreign_market_count,
+            "duplicate_articles_grouped_or_skipped": duplicate_article_count,
+        })
 
+    print(f"Foreign domestic-market headlines excluded: {excluded_foreign_market_count}")
     return groups
-
- 
-
- 
 
 def extract_publisher_url_from_id(url):
 
@@ -1219,7 +1250,8 @@ def main():
 
  
 
-    groups = build_groups(candidates)
+    grouping_stats = {}
+    groups = build_groups(candidates, stats=grouping_stats)
 
     url_stats = resolve_group_urls(groups)
 
@@ -1238,6 +1270,7 @@ def main():
         "candidate_count": len(candidates),
 
         "group_count": len(groups),
+        "editorial_filtering": grouping_stats,
 
         "article_count": len(members),
 

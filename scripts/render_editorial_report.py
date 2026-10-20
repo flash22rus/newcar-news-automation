@@ -58,10 +58,21 @@ def render(report):
             f"({group.get('relevance_label', 'low')})",
             "- Оценка автоматическая, по ключевым словам.",
             f"- **Источник:** {source}",
+            f"- **Материалов в группе:** {len(group.get('members') or [])}; "
+            f"изданий: {group.get('source_count', 1)}",
             f"- **Дата публикации (UTC):** {published}",
             f"- **Статус проверки:** {status}",
             f"- **Ссылка на материал:** {url}",
         ])
+
+        for related in (group.get("members") or [])[1:]:
+            related_source = related.get("source_name") or "Источник не указан"
+            related_url = related.get("url") or "Ссылка не найдена"
+            related_date = related.get("published_utc") or "Дата не указана"
+            lines.append(
+                f"- **Дополнительная публикация:** {related_source}; "
+                f"{related_date}; {related_url}"
+            )
 
         if original_url and original_url != url:
             lines.append(

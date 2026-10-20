@@ -64,14 +64,24 @@ def publisher_key(url):
     return (match.group(1).lower().removeprefix("www.") if match else "")
 
 
-def source_urls_for(group, web_sources):
-    urls = []
-    for item in list(group.get("members") or []) + list(web_sources or []):
+def source_urls_for(group, web_sources, facts=None):
+    member_urls = [
+        str(member.get("url") or "").strip()
+        for member in (group.get("members") or [])
+        if isinstance(member, dict)
+    ]
+    evidence_urls = [
+        str(url or "").strip()
+        for fact in (facts or []) if isinstance(fact, dict)
+        for url in (fact.get("source_urls") or [])
+    ]
+    primary_url = next((url for url in member_urls if is_https_url(url) and "news.google.com" not in url.lower()), "")
+    urls = [primary_url] + evidence_urls + member_urls
+    for item in web_sources or []:
         candidate = item.get("url") if isinstance(item, dict) else item
         candidate = str(candidate or "").strip()
-        if is_https_url(candidate) and "news.google.com" not in candidate.lower():
-            if candidate not in urls:
-                urls.append(candidate)
+        urls.append(candidate)
+    urls = [url for url in urls if is_https_url(url) and "news.google.com" not in url.lower()]
     # Four distinct publisher domains are required by NEWCAR News Draft 2.0.
     selected = []
     domains = set()
@@ -362,7 +372,7 @@ def main():
         item = {"title": group.get("title"), "status": "incomplete", "telegram": None, "instagram": None}
         try:
             copy, web_sources = generate_copy(os.environ["OPENAI_API_KEY"], os.environ["OPENAI_TEXT_MODEL"], group)
-            sources = source_urls_for(group, web_sources)
+            sources = source_urls_for(group, web_sources, copy["key_facts"])
             item["source_url"] = sources[0]
             item["verification_sources"] = sources
             item["title"] = copy["title"]

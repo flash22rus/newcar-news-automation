@@ -62,6 +62,25 @@ class ChannelDraftsTests(unittest.TestCase):
                 {"url": "https://c.example/4"},
             ])
 
+    def test_source_selection_prioritizes_primary_and_fact_evidence(self):
+        group = {"members": [{"url": "https://primary.example/article"}]}
+        facts = [{"fact": "Событие", "source_urls": [
+            "https://evidence-one.example/article",
+            "https://evidence-two.example/article",
+            "https://evidence-three.example/article",
+        ]}]
+        result = channel_drafts.source_urls_for(
+            group,
+            [{"url": "https://unrelated.example/story"}],
+            facts,
+        )
+        self.assertEqual(result, [
+            "https://primary.example/article",
+            "https://evidence-one.example/article",
+            "https://evidence-two.example/article",
+            "https://evidence-three.example/article",
+        ])
+
     def test_source_selection_excludes_google_redirects(self):
         group = {"members": [{"url": "https://news.google.com/rss/x"}]}
         with self.assertRaises(channel_drafts.PipelineError):

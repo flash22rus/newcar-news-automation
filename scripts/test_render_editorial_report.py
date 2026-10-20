@@ -1,0 +1,127 @@
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Tests for the NEWCAR editorial report renderer."""
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "render_editorial_report.py"
+
+spec = importlib.util.spec_from_file_location(
+    "render_editorial_report",
+    SCRIPT,
+)
+render_editorial_report = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = render_editorial_report
+spec.loader.exec_module(render_editorial_report)
+
+
+class TestEditorialReport(unittest.TestCase):
+
+    def test_empty_report_is_rendered_safely(self):
+        result = render_editorial_report.render({
+            "generated_utc": "2026-10-20T00:00:00+00:00",
+            "candidate_count": 0,
+            "group_count": 0,
+            "groups": [],
+        })
+
+        self.assertIn("NEWCAR", result)
+        self.assertIn("Кандидатов нет.", result)
+        self.assertIn("publication_ready: false", result)
+        self.assertIn("fact_checking_complete: false", result)
+
+    def test_article_title_source_date_and_url_are_rendered(self):
+        report = {
+            "generated_utc": "2026-10-20T00:00:00+00:00",
+            "candidate_count": 1,
+            "group_count": 1,
+            "groups": [
+                {
+                    "title": "Импорт автомобилей из Японии",
+                    "relevance_score": 85,
+                    "relevance_label": "high",
+                    "members": [
+                        {
+                            "title": "Импорт автомобилей из Японии",
+                            "source_name": "Пример издания",
+                            "published_utc": "2026-10-19T20:00:00+00:00",
+                            "url": "https://example.com/news/123",
+                            "verification_status":
+                                "needs_manual_verification",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        result = render_editorial_report.render(report)
+
+        self.assertIn("Импорт автомобилей из Японии", result)
+        self.assertIn("Пример издания", result)
+        self.assertIn("https://example.com/news/123", result)
+        self.assertIn("85/100", result)
+        self.assertIn("needs_manual_verification", result)
+
+    def test_unresolved_google_news_url_is_flagged(self):
+        report = {
+            "groups": [
+                {
+                    "title": "Тестовая новость",
+                    "relevance_score": 50,
+                    "relevance_label": "medium",
+                    "members": [
+                        {
+                            "title": "Тестовая новость",
+                            "url": (
+                                "https://news.google.com/rss/articles/example"
+                            ),
+                            "original_url": (
+                                "https://news.google.com/rss/articles/example"
+                            ),
+                            "source_url_needs_resolution": True,
+                            "publisher_search_url": (
+                                "https://www.google.com/search?q=test"
+                            ),
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = render_editorial_report.render(report)
+
+        self.assertIn("Ссылка Google News не разрешена", result)
+        self.assertIn("Поиск у издателя", result)
+        self.assertIn("publication_ready: false", result)
+
+    def test_report_never_claims_automatic_fact_checking(self):
+        report = {
+            "groups": [
+                {
+                    "title": "Проверка статуса",
+                    "relevance_score": 60,
+                    "relevance_label": "medium",
+                    "members": [{}],
+                }
+            ]
+        }
+
+        result = render_editorial_report.render(report)
+
+        self.assertIn("publication_ready: false", result)
+        self.assertIn("fact_checking_complete: false", result)
+        self.assertIn(
+            "Автоматическая отправка в Telegram не выполняется.",
+            result,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

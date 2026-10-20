@@ -68,6 +68,20 @@ jobs:
       - name: Create editorial report
         run: python scripts/render_editorial_report.py
 
+      - name: Prepare draft idempotency state
+        if: ${{ inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true') }}
+        run: |
+          mkdir -p .newcar-state
+          test -f .newcar-state/drafts.json || printf '{"version":1,"entries":{}}\n' > .newcar-state/drafts.json
+
+      - name: Restore draft idempotency state
+        if: ${{ inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true') }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .newcar-state/drafts.json
+          key: newcar-drafts-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: newcar-drafts-
+
       - name: Create Telegram and Instagram drafts
         if: ${{ inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true') }}
         env:
@@ -88,6 +102,13 @@ jobs:
           NEWCAR_MIN_RELEVANCE: "75"
           NEWCAR_MAX_DRAFTS: "3"
         run: python scripts/channel_drafts.py
+
+      - name: Save draft idempotency state
+        if: ${{ always() && (inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true')) }}
+        uses: actions/cache/save@v4
+        with:
+          path: .newcar-state/drafts.json
+          key: newcar-drafts-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload news reports
         if: always()

@@ -1,10 +1,42 @@
+import json
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import channel_drafts
 
 
 class ChannelDraftsTests(unittest.TestCase):
+    def test_canonical_source_url_drops_fragment(self):
+        self.assertEqual(
+            channel_drafts.canonical_source_url("https://News.Example/story#facts"),
+            "https://news.example/story",
+        )
+
+    def test_source_url_validation_rejects_credentials_and_invalid_https(self):
+        self.assertFalse(channel_drafts.is_https_url("https://user:pass@example.com/news"))
+        self.assertFalse(channel_drafts.is_https_url("https://"))
+        self.assertFalse(channel_drafts.is_https_url("https://bad[host/news"))
+
+    def test_publication_state_prunes_entries_older_than_retention(self):
+        now = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        state = {"version": 1, "entries": {
+            "https://old.example/news": {"updated_at": (now - timedelta(days=31)).isoformat()},
+            "https://recent.example/news": {"updated_at": (now - timedelta(days=2)).isoformat()},
+        }}
+        state_directory = Path(__file__).resolve().parent / ".test-publication-state"
+        state_path = state_directory / "drafts.json"
+        state_directory.mkdir(exist_ok=True)
+        try:
+            channel_drafts.save_publication_state(state, path=state_path, now=now)
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+        finally:
+            state_path.unlink(missing_ok=True)
+            state_path.with_name(state_path.name + ".tmp").unlink(missing_ok=True)
+            state_directory.rmdir()
+        self.assertEqual(set(loaded["entries"]), {"https://recent.example/news"})
+
     def test_responses_api_text_is_extracted_from_raw_output_items(self):
         response = {
             "output": [{
@@ -40,6 +72,28 @@ class ChannelDraftsTests(unittest.TestCase):
         response.headers.get_content_type.return_value = "text/html"
         with self.assertRaisesRegex(channel_drafts.PipelineError, "не отдаёт изображение"):
             channel_drafts.verify_public_image_url("https://cdn.example/news.png")
+
+    @patch.object(channel_drafts, "request_json")
+    def test_telegram_worker_duplicate_pending_draft_is_idempotent(self, mock_request):
+        mock_request.return_value = {
+            "ok": True, "action": "news_duplicate", "draft_id": "draft-123", "status": "pending",
+        }
+        result = channel_drafts.send_telegram_draft(
+            "secret", "https://worker.example/newsdraft", {"title": "Новость"},
+        )
+        self.assertTrue(result["duplicate"])
+        self.assertTrue(result["approval_required"])
+        self.assertEqual(result["draft_id"], "draft-123")
+
+    @patch.object(channel_drafts, "request_json")
+    def test_telegram_worker_rejected_duplicate_blocks_other_channel(self, mock_request):
+        mock_request.return_value = {
+            "ok": True, "action": "news_duplicate", "draft_id": "draft-123", "status": "rejected",
+        }
+        with self.assertRaisesRegex(channel_drafts.PipelineError, "отклонили"):
+            channel_drafts.send_telegram_draft(
+                "secret", "https://worker.example/newsdraft", {"title": "Новость"},
+            )
 
     def test_only_high_score_groups_with_resolved_direct_sources_are_selected(self):
         groups = [

@@ -11,16 +11,18 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT_FILE = ROOT / "news_verification.json"
 OUTPUT_FILE = ROOT / "channel_drafts.json"
+STATE_FILE = ROOT / ".newcar-state" / "drafts.json"
+STATE_RETENTION_DAYS = 30
 TIMEOUT = 60
 NEWSCAR_STYLE = (
     "NEWCAR Premium Dark visual identity: premium automotive editorial photo, "
@@ -56,7 +58,33 @@ def request_json(url, *, method="GET", headers=None, body=None, timeout=TIMEOUT)
 
 
 def is_https_url(url):
-    return isinstance(url, str) and url.startswith("https://") and " " not in url
+    if not isinstance(url, str) or " " in url:
+        return False
+    try:
+        parsed = urlsplit(url.strip())
+        return (
+            parsed.scheme.lower() == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except ValueError:
+        return False
+
+
+def canonical_source_url(url):
+    if not is_https_url(url):
+        return ""
+    parts = urlsplit(url.strip())
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
+
+
+def primary_source_url(group):
+    for member in group.get("members") or []:
+        url = canonical_source_url(member.get("url") or "") if isinstance(member, dict) else ""
+        if url and "news.google.com" not in url.lower():
+            return url
+    return ""
 
 
 def publisher_key(url):
@@ -294,11 +322,21 @@ def send_telegram_draft(api_key, endpoint, payload):
         headers={"X-NEWCAR-SECRET": api_key, "Content-Type": "application/json"},
         body=payload,
     )
-    if (result.get("action") != "news_draft_created" or
-            result.get("status") != "pending" or
-            result.get("approval_required") is not True):
-        raise PipelineError("Telegram Worker не подтвердил создание ожидающего черновика")
-    return {"status": result.get("status"), "draft_id": result.get("draft_id"), "approval_required": True}
+    action = result.get("action")
+    status = result.get("status")
+    draft_id = result.get("draft_id")
+    if action == "news_draft_created" and status == "pending" and result.get("approval_required") is True:
+        return {"status": status, "draft_id": draft_id, "approval_required": True, "duplicate": False}
+    if action == "news_duplicate" and draft_id and status in {"pending", "published"}:
+        return {
+            "status": status,
+            "draft_id": draft_id,
+            "approval_required": status == "pending",
+            "duplicate": True,
+        }
+    if action == "news_duplicate" and status == "rejected":
+        raise PipelineError("Telegram: эту новость уже отклонили; второй канал не создавался")
+    raise PipelineError("Telegram Worker не подтвердил создание или наличие ожидающего черновика")
 
 
 def metricool_request(token, user_id, blog_id, endpoint, *, method="GET", body=None):
@@ -367,28 +405,70 @@ def main():
     report = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
     groups = choose_groups(report, minimum_score=int(os.getenv("NEWCAR_MIN_RELEVANCE", "75")), limit=int(os.getenv("NEWCAR_MAX_DRAFTS", "3")))
     results = []
+    state = load_publication_state()
     write_results(results, len(groups))
     for group in groups:
         item = {"title": group.get("title"), "status": "incomplete", "telegram": None, "instagram": None}
         try:
-            copy, web_sources = generate_copy(os.environ["OPENAI_API_KEY"], os.environ["OPENAI_TEXT_MODEL"], group)
-            sources = source_urls_for(group, web_sources, copy["key_facts"])
-            item["source_url"] = sources[0]
+            state_source = primary_source_url(group)
+            if not state_source:
+                raise PipelineError("У новости нет прямого HTTPS первоисточника")
+            saved = state["entries"].get(state_source, {})
+            if saved.get("telegram") and saved.get("instagram"):
+                item.update({
+                    "source_url": state_source,
+                    "telegram": saved["telegram"],
+                    "instagram": saved["instagram"],
+                    "status": "already_drafted",
+                })
+                results.append(item)
+                write_results(results, len(groups))
+                continue
+            copy = saved.get("copy")
+            sources = saved.get("channel_sources")
+            web_sources = saved.get("web_sources") or []
+            image_url = saved.get("image_url")
+            if not isinstance(copy, dict) or not isinstance(sources, list) or len(sources) != 4 or not is_https_url(image_url):
+                copy, web_sources = generate_copy(os.environ["OPENAI_API_KEY"], os.environ["OPENAI_TEXT_MODEL"], group)
+                sources = source_urls_for(group, web_sources, copy["key_facts"])
+                source_hash = hashlib.sha256(state_source.encode("utf-8")).hexdigest()[:20]
+                image_path = ROOT / "generated" / f"{source_hash}.png"
+                image = generate_image(os.environ["OPENAI_API_KEY"], os.environ["OPENAI_IMAGE_MODEL"], copy["image_prompt"], image_path)
+                image_url = upload_r2(image, f"newcar-news/{source_hash}.png")
+                verify_public_image_url(image_url)
+                saved.update({
+                    "copy": copy,
+                    "web_sources": web_sources,
+                    "channel_sources": sources,
+                    "image_url": image_url,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                state["entries"][state_source] = saved
+                save_publication_state(state)
+            else:
+                verify_public_image_url(image_url)
+            item["source_url"] = state_source
             item["verification_sources"] = sources
             item["title"] = copy["title"]
             item["key_facts"] = copy["key_facts"]
-            source_hash = hashlib.sha256(sources[0].encode("utf-8")).hexdigest()[:20]
-            image_path = ROOT / "generated" / f"{source_hash}.png"
-            image = generate_image(os.environ["OPENAI_API_KEY"], os.environ["OPENAI_IMAGE_MODEL"], copy["image_prompt"], image_path)
-            image_url = upload_r2(image, f"newcar-news/{source_hash}.png")
-            verify_public_image_url(image_url)
             item["image_url"] = image_url
             telegram = send_telegram_draft(os.environ["TELEGRAM_WORKER_SECRET"], os.environ["TELEGRAM_WORKER_URL"], {
                 "title": copy["title"], "text": build_worker_text(copy, sources, copy["title"]),
-                "sourceUrl": sources[0], "imageUrl": image_url,
+                "sourceUrl": state_source, "imageUrl": image_url,
             })
             item["telegram"] = telegram
-            instagram = create_metricool_draft(os.environ["METRICOOL_API_TOKEN"], os.environ["METRICOOL_USER_ID"], os.environ["METRICOOL_BLOG_ID"], copy["instagram_text"], image_url)
+            saved["telegram"] = telegram
+            saved["updated_at"] = datetime.now(timezone.utc).isoformat()
+            state["entries"][state_source] = saved
+            save_publication_state(state)
+            if saved.get("instagram"):
+                instagram = saved["instagram"]
+            else:
+                instagram = create_metricool_draft(os.environ["METRICOOL_API_TOKEN"], os.environ["METRICOOL_USER_ID"], os.environ["METRICOOL_BLOG_ID"], copy["instagram_text"], image_url)
+                saved["instagram"] = instagram
+                saved["updated_at"] = datetime.now(timezone.utc).isoformat()
+                state["entries"][state_source] = saved
+                save_publication_state(state)
             item["instagram"] = instagram
             item["status"] = "drafts_created"
             item["fact_checking_complete"] = False
@@ -401,8 +481,8 @@ def main():
             item["error"] = f"Ошибка интеграции: {type(exc).__name__}"
         results.append(item)
         write_results(results, len(groups))
-    failed = sum(item["status"] != "drafts_created" for item in results)
-    print(f"Готово черновиков в обоих каналах: {len(results) - failed}; ошибок/пропусков: {failed}. Публикация не выполнялась.")
+    failed = sum(item["status"] not in {"drafts_created", "already_drafted"} for item in results)
+    print(f"Готово/уже создано черновиков: {len(results) - failed}; ошибок: {failed}. Публикация не выполнялась.")
     return 1 if failed else 0
 
 
@@ -410,10 +490,54 @@ def write_results(results, eligible_count):
     OUTPUT_FILE.write_text(json.dumps({
         "drafts": results,
         "eligible_group_count": eligible_count,
-        "completed_group_count": sum(item.get("status") == "drafts_created" for item in results),
+        "completed_group_count": sum(item.get("status") in {"drafts_created", "already_drafted"} for item in results),
         "publication_ready": False,
         "fact_checking_complete": False,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_publication_state(path=STATE_FILE):
+    if not path.exists():
+        return {"version": 1, "entries": {}}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise PipelineError("Не удалось прочитать кэш идемпотентности черновиков") from None
+    if not isinstance(state, dict) or state.get("version") != 1 or not isinstance(state.get("entries"), dict):
+        raise PipelineError("Кэш идемпотентности черновиков имеет неподдерживаемый формат")
+    return state
+
+
+def save_publication_state(state, path=STATE_FILE, now=None):
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=STATE_RETENTION_DAYS)
+    entries = state.get("entries", {})
+    retained = {}
+    for source_url, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if updated_at >= cutoff:
+            retained[source_url] = entry
+    payload = {"version": 1, "entries": retained}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(path.name + ".tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    state["entries"] = retained
+    return state
 
 
 if __name__ == "__main__":

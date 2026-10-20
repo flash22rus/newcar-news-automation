@@ -23,6 +23,24 @@ class ChannelDraftsTests(unittest.TestCase):
         }
         self.assertEqual(channel_drafts._response_sources(response), ["https://one.example/news"])
 
+    @patch.object(channel_drafts, "urlopen")
+    def test_public_image_url_requires_png_content_type(self, mock_urlopen):
+        response = mock_urlopen.return_value.__enter__.return_value
+        response.status = 200
+        response.headers.get_content_type.return_value = "image/png"
+        self.assertEqual(
+            channel_drafts.verify_public_image_url("https://cdn.example/news.png"),
+            "https://cdn.example/news.png",
+        )
+
+    @patch.object(channel_drafts, "urlopen")
+    def test_private_or_wrong_content_type_image_is_rejected(self, mock_urlopen):
+        response = mock_urlopen.return_value.__enter__.return_value
+        response.status = 200
+        response.headers.get_content_type.return_value = "text/html"
+        with self.assertRaisesRegex(channel_drafts.PipelineError, "не отдаёт изображение"):
+            channel_drafts.verify_public_image_url("https://cdn.example/news.png")
+
     def test_only_high_score_groups_with_resolved_direct_sources_are_selected(self):
         groups = [
             {"title": "medium", "relevance_score": 64, "members": [{"url": "https://a.example/x"}]},

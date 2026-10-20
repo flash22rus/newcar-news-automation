@@ -257,6 +257,24 @@ def upload_r2(content, object_name):
     return public_url
 
 
+def verify_public_image_url(image_url):
+    if not is_https_url(image_url):
+        raise PipelineError("Ссылка на изображение должна быть HTTPS")
+    request = Request(image_url, method="HEAD", headers={"User-Agent": "NEWCAR-News-Automation/1.0"})
+    try:
+        with urlopen(request, timeout=TIMEOUT) as response:
+            content_type = response.headers.get_content_type()
+            if response.status < 200 or response.status >= 300:
+                raise PipelineError("Публичный URL изображения вернул ошибочный статус")
+            if content_type != "image/png":
+                raise PipelineError("Публичный URL не отдаёт изображение PNG")
+    except HTTPError as exc:
+        raise PipelineError(f"Публичный URL изображения недоступен (HTTP {exc.code})") from None
+    except (URLError, TimeoutError) as exc:
+        raise PipelineError(f"Проверка URL изображения не прошла: {type(exc).__name__}") from None
+    return image_url
+
+
 def send_telegram_draft(api_key, endpoint, payload):
     if not is_https_url(endpoint):
         raise PipelineError("Telegram Worker endpoint должен быть HTTPS")
@@ -353,6 +371,7 @@ def main():
             image_path = ROOT / "generated" / f"{source_hash}.png"
             image = generate_image(os.environ["OPENAI_API_KEY"], os.environ["OPENAI_IMAGE_MODEL"], copy["image_prompt"], image_path)
             image_url = upload_r2(image, f"newcar-news/{source_hash}.png")
+            verify_public_image_url(image_url)
             item["image_url"] = image_url
             telegram = send_telegram_draft(os.environ["TELEGRAM_WORKER_SECRET"], os.environ["TELEGRAM_WORKER_URL"], {
                 "title": copy["title"], "text": build_worker_text(copy, sources, copy["title"]),

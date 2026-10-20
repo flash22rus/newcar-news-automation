@@ -24,6 +24,9 @@ class ChannelDraftsTests(unittest.TestCase):
         state = {"version": 1, "entries": {
             "https://old.example/news": {"updated_at": (now - timedelta(days=31)).isoformat()},
             "https://recent.example/news": {"updated_at": (now - timedelta(days=2)).isoformat()},
+        }, "carousels": {
+            "old-carousel": {"updated_at": (now - timedelta(days=31)).isoformat()},
+            "recent-carousel": {"updated_at": (now - timedelta(days=2)).isoformat()},
         }}
         state_directory = Path(__file__).resolve().parent / ".test-publication-state"
         state_path = state_directory / "drafts.json"
@@ -36,6 +39,21 @@ class ChannelDraftsTests(unittest.TestCase):
             state_path.with_name(state_path.name + ".tmp").unlink(missing_ok=True)
             state_directory.rmdir()
         self.assertEqual(set(loaded["entries"]), {"https://recent.example/news"})
+        self.assertEqual(set(loaded["carousels"]), {"recent-carousel"})
+        self.assertEqual(loaded["version"], 2)
+
+    def test_publication_state_migrates_version_one_cache(self):
+        state_directory = Path(__file__).resolve().parent / ".test-state-migration"
+        state_path = state_directory / "drafts.json"
+        state_directory.mkdir(exist_ok=True)
+        state_path.write_text(json.dumps({"version": 1, "entries": {}}), encoding="utf-8")
+        try:
+            state = channel_drafts.load_publication_state(state_path)
+        finally:
+            state_path.unlink(missing_ok=True)
+            state_directory.rmdir()
+        self.assertEqual(state["version"], 2)
+        self.assertEqual(state["carousels"], {})
 
     def test_partial_channel_failure_resumes_without_regenerating_content(self):
         test_directory = Path(__file__).resolve().parent / ".test-partial-retry"
@@ -48,6 +66,7 @@ class ChannelDraftsTests(unittest.TestCase):
             "title": "Проверка новой модели для российского рынка",
             "telegram_text": "Опубликованы сведения о новой модели.",
             "instagram_text": "Вышла новая модель для российского рынка.",
+            "buyer_impact": "Влияние на сроки и стоимость импорта пока не подтверждено.",
             "image_prompt": "Автомобиль на тестовой площадке",
             "key_facts": [{"fact": "Представлена новая модель"}],
         }
@@ -92,6 +111,9 @@ class ChannelDraftsTests(unittest.TestCase):
                 patch.object(channel_drafts, "generate_image", return_value=b"image"),
                 patch.object(channel_drafts, "upload_r2", return_value="https://cdn.example/news.png"),
                 patch.object(channel_drafts, "verify_public_image_url", side_effect=lambda url: url),
+                patch.object(channel_drafts, "build_carousel_image_urls", return_value=[
+                    "https://cdn.example/cover.png", "https://cdn.example/story.png", "https://cdn.example/cta.png",
+                ]),
                 patch.object(
                     channel_drafts, "send_telegram_draft",
                     side_effect=[telegram_initial, telegram_duplicate],
@@ -119,10 +141,91 @@ class ChannelDraftsTests(unittest.TestCase):
                 test_directory.rmdir()
 
         self.assertEqual(generate_copy.call_count, 1)
-        self.assertEqual(send_telegram.call_count, 2)
+        self.assertEqual(send_telegram.call_count, 1)
         self.assertEqual(create_instagram.call_count, 2)
-        self.assertEqual(final_state["entries"][source]["instagram"], instagram)
+        self.assertEqual(final_state["version"], 2)
+        self.assertEqual(len(final_state["carousels"]), 1)
+        self.assertEqual(final_state["carousels"][next(iter(final_state["carousels"]))]["id"], instagram["id"])
         self.assertEqual(output["drafts"][0]["status"], "drafts_created")
+        self.assertEqual(output["instagram_carousel"]["media_count"], 3)
+        self.assertFalse(output["publication_ready"])
+        self.assertFalse(output["fact_checking_complete"])
+
+    def test_main_creates_one_carousel_for_all_selected_news(self):
+        test_directory = Path(__file__).resolve().parent / ".test-daily-carousel"
+        state_path = test_directory / "state" / "drafts.json"
+        report_path = test_directory / "news_verification.json"
+        output_path = test_directory / "channel_drafts.json"
+        test_directory.mkdir(exist_ok=True)
+        report_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
+        sources = ["https://primary-one.example/news", "https://primary-two.example/news"]
+        groups = [{"title": f"Новость {index}", "members": [{"url": source}]} for index, source in enumerate(sources, 1)]
+        copies = []
+        for index in range(1, 3):
+            copies.append(({
+                "title": f"Изменение рынка импортных автомобилей {index}",
+                "telegram_text": f"Сведения о новости {index}.",
+                "instagram_text": f"Краткий пост по новости {index}.",
+                "buyer_impact": "Влияние на сроки и стоимость пока не подтверждено.",
+                "image_prompt": f"Редакционный автомобильный кадр {index}",
+                "key_facts": [{"fact": f"Подтверждённый факт новости {index}"}],
+            }, []))
+        required_env = {
+            "NEWCAR_CREATE_DRAFTS": "true", "OPENAI_API_KEY": "test-key",
+            "OPENAI_TEXT_MODEL": "test-text", "OPENAI_IMAGE_MODEL": "test-image",
+            "TELEGRAM_WORKER_URL": "https://worker.example/newsdraft", "TELEGRAM_WORKER_SECRET": "test-secret",
+            "METRICOOL_API_TOKEN": "test-metricool", "METRICOOL_USER_ID": "test-user",
+            "METRICOOL_BLOG_ID": "test-brand", "R2_ACCOUNT_ID": "test-account", "R2_BUCKET": "test-bucket",
+            "R2_ACCESS_KEY_ID": "test-access", "R2_SECRET_ACCESS_KEY": "test-r2-secret",
+            "R2_PUBLIC_BASE_URL": "https://cdn.example", "NEWCAR_MIN_RELEVANCE": "75", "NEWCAR_MAX_DRAFTS": "3",
+        }
+        load_state = channel_drafts.load_publication_state
+        save_state = channel_drafts.save_publication_state
+        metricool_urls = [f"https://cdn.example/carousel-{index}.png" for index in range(4)]
+        try:
+            with (
+                patch.object(channel_drafts, "REPORT_FILE", report_path),
+                patch.object(channel_drafts, "OUTPUT_FILE", output_path),
+                patch.object(channel_drafts, "STATE_FILE", state_path),
+                patch.object(channel_drafts, "load_publication_state", side_effect=lambda: load_state(state_path)),
+                patch.object(channel_drafts, "save_publication_state", side_effect=lambda state: save_state(state, path=state_path)),
+                patch.object(channel_drafts, "choose_groups", return_value=groups),
+                patch.object(channel_drafts, "generate_copy", side_effect=copies),
+                patch.object(channel_drafts, "source_urls_for", side_effect=lambda group, *_: [group["members"][0]["url"]] + [f"https://evidence-{i}-{group['title'][-1]}.example/news" for i in range(1, 4)]),
+                patch.object(channel_drafts, "generate_image", side_effect=[b"image-one", b"image-two"]),
+                patch.object(channel_drafts, "upload_r2", side_effect=lambda _content, name: f"https://cdn.example/{name.replace('/', '-')}"),
+                patch.object(channel_drafts, "verify_public_image_url", side_effect=lambda url: url),
+                patch.object(channel_drafts, "send_telegram_draft", side_effect=[
+                    {"status": "pending", "draft_id": "tg-1", "approval_required": True, "duplicate": False},
+                    {"status": "pending", "draft_id": "tg-2", "approval_required": True, "duplicate": False},
+                ]) as send_telegram,
+                patch.object(channel_drafts, "build_carousel_image_urls", return_value=metricool_urls) as build_images,
+                patch.object(channel_drafts, "create_metricool_draft", return_value={
+                    "status": "draft", "id": "one-daily-carousel", "auto_publish": False,
+                }) as create_instagram,
+                patch.dict("os.environ", required_env, clear=True),
+            ):
+                self.assertEqual(channel_drafts.main(), 0)
+                self.assertEqual(channel_drafts.main(), 0)
+                output = json.loads(output_path.read_text(encoding="utf-8"))
+        finally:
+            for path in (report_path, output_path, state_path, state_path.with_name(state_path.name + ".tmp")):
+                path.unlink(missing_ok=True)
+            if state_path.parent.exists():
+                state_path.parent.rmdir()
+            if test_directory.exists():
+                test_directory.rmdir()
+
+        self.assertEqual(send_telegram.call_count, 2)
+        self.assertEqual(build_images.call_count, 1)
+        self.assertEqual(len(build_images.call_args.args[0]), 2)
+        self.assertEqual(create_instagram.call_count, 1)
+        self.assertEqual(create_instagram.call_args.args[4], metricool_urls)
+        self.assertEqual(output["instagram_carousel"]["id"], "one-daily-carousel")
+        self.assertEqual(output["instagram_carousel"]["story_count"], 2)
+        self.assertEqual(output["instagram_carousel"]["media_count"], 4)
+        self.assertEqual(output["instagram_carousel"]["image_urls"], metricool_urls)
+        self.assertTrue(all(item["status"] == "drafts_created" for item in output["drafts"]))
         self.assertFalse(output["publication_ready"])
         self.assertFalse(output["fact_checking_complete"])
 
@@ -143,6 +246,33 @@ class ChannelDraftsTests(unittest.TestCase):
             }],
         }
         self.assertEqual(channel_drafts._response_sources(response), ["https://one.example/news"])
+
+    @patch.object(channel_drafts, "request_json")
+    def test_editorial_copy_requires_short_buyer_impact_for_carousel(self, mock_request):
+        sources = ["https://one.example/news", "https://two.example/news"]
+        copy = {
+            "title": "Заголовок новости", "telegram_text": "Текст для Telegram.",
+            "instagram_text": "Текст для Instagram.",
+            "buyer_impact": "Покупателям следует проверить новые требования до оформления заказа.",
+            "image_prompt": "Автомобиль для иллюстрации новости",
+            "key_facts": [
+                {"fact": "Подтверждённое изменение.", "source_urls": sources},
+                {"fact": "Подтверждённая дополнительная деталь.", "source_urls": sources},
+            ],
+        }
+        mock_request.return_value = {
+            "output_text": json.dumps(copy, ensure_ascii=False),
+            "output": [{"type": "web_search_call", "action": {"sources": [{"url": url} for url in sources]}}],
+        }
+        result, _ = channel_drafts.generate_copy("key", "model", {"title": "Проверка", "members": []})
+        self.assertEqual(result["buyer_impact"], copy["buyer_impact"])
+        schema = mock_request.call_args.kwargs["body"]["text"]["format"]["schema"]
+        self.assertIn("buyer_impact", schema["required"])
+
+        copy["buyer_impact"] = " ".join(["слово"] * 26)
+        mock_request.return_value["output_text"] = json.dumps(copy, ensure_ascii=False)
+        with self.assertRaisesRegex(channel_drafts.PipelineError, "не более чем в 25 словах"):
+            channel_drafts.generate_copy("key", "model", {"title": "Проверка", "members": []})
 
     @patch.object(channel_drafts, "urlopen")
     def test_public_image_url_requires_png_content_type(self, mock_urlopen):
@@ -289,8 +419,92 @@ class ChannelDraftsTests(unittest.TestCase):
         self.assertTrue(body["draft"])
         self.assertFalse(body["autoPublish"])
         self.assertFalse(body["instagramData"]["autoPublish"])
+        self.assertEqual(body["media"], ["media-123"])
         self.assertEqual(result["status"], "draft")
         self.assertFalse(result["auto_publish"])
+
+    @patch.object(channel_drafts, "metricool_request")
+    @patch.object(channel_drafts, "request_json")
+    def test_metricool_carousel_preserves_image_order_and_caps_at_ten(self, mock_request, mock_api):
+        mock_request.side_effect = [
+            {"mediaId": "cover-id"},
+            {"data": {"id": "story-id"}},
+            {"id": "cta-id"},
+        ]
+        mock_api.return_value = {"id": "carousel-draft"}
+        result = channel_drafts.create_metricool_draft(
+            "token", "user", "brand", "caption", [
+                "https://cdn.example/cover.png",
+                "https://cdn.example/story.png",
+                "https://cdn.example/cta.png",
+            ],
+        )
+
+        body = mock_api.call_args.kwargs["body"]
+        self.assertEqual(body["media"], ["cover-id", "story-id", "cta-id"])
+        self.assertTrue(body["draft"])
+        self.assertFalse(body["autoPublish"])
+        self.assertFalse(body["instagramData"]["autoPublish"])
+        self.assertEqual(mock_request.call_count, 3)
+        self.assertEqual(result["id"], "carousel-draft")
+
+    def test_metricool_rejects_empty_or_oversized_carousels(self):
+        for urls in ([], [f"https://cdn.example/{i}.png" for i in range(11)]):
+            with self.subTest(count=len(urls)), self.assertRaisesRegex(channel_drafts.PipelineError, "от 1 до 10"):
+                channel_drafts.create_metricool_draft("token", "user", "brand", "caption", urls)
+
+    def test_carousel_slides_render_portrait_4_by_5_pngs(self):
+        from PIL import Image
+
+        source = Image.new("RGB", (1024, 1280), "#30343A")
+        source_buffer = channel_drafts.io.BytesIO()
+        source.save(source_buffer, format="PNG")
+        story = {
+            "title": "Обновлены правила ввоза автомобилей",
+            "key_facts": [{"fact": "Новые требования опубликованы официальным ведомством."}],
+            "buyer_impact": "Покупателям следует проверить требования до оформления документов.",
+            "source_url": "https://agency.example/news",
+        }
+        rendered = [
+            channel_drafts.render_carousel_slide("cover"),
+            channel_drafts.render_carousel_slide("story", story=story, image_content=source_buffer.getvalue(), index=1),
+            channel_drafts.render_carousel_slide("cta"),
+        ]
+        for content in rendered:
+            with Image.open(channel_drafts.io.BytesIO(content)) as image:
+                self.assertEqual(image.size, (1080, 1350))
+                self.assertEqual(image.format, "PNG")
+
+    def test_carousel_caption_has_three_sentences_and_no_more_than_five_hashtags(self):
+        caption = channel_drafts.build_carousel_caption([
+            {"title": "Изменились условия импорта автомобилей"},
+            {"title": "Обновлён порядок оформления автомобилей"},
+        ])
+        self.assertLessEqual(caption.count("#"), 5)
+        self.assertIn("#автоимпорт", caption)
+        self.assertLessEqual(caption.count("."), 3)
+
+    @patch.object(channel_drafts, "verify_public_image_url", side_effect=lambda url: url)
+    @patch.object(channel_drafts, "upload_r2", side_effect=lambda _content, name: f"https://cdn.example/{name}")
+    @patch.object(channel_drafts, "render_carousel_slide", side_effect=[b"cover", b"story-1", b"story-2", b"cta"])
+    @patch.object(channel_drafts, "fetch_public_image", side_effect=[b"source-1", b"source-2"])
+    def test_carousel_upload_order_is_cover_stories_then_cta(self, mock_fetch, mock_render, mock_upload, _mock_verify):
+        stories = [
+            {"image_url": "https://cdn.example/source-1.png"},
+            {"image_url": "https://cdn.example/source-2.png"},
+        ]
+        urls = channel_drafts.build_carousel_image_urls(stories, "digest")
+
+        self.assertEqual(urls, [
+            "https://cdn.example/newcar-news/carousels/digest/cover.png",
+            "https://cdn.example/newcar-news/carousels/digest/story-01.png",
+            "https://cdn.example/newcar-news/carousels/digest/story-02.png",
+            "https://cdn.example/newcar-news/carousels/digest/cta.png",
+        ])
+        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertEqual(mock_render.call_args_list[0].args, ("cover",))
+        self.assertEqual(mock_render.call_args_list[-1].args, ("cta",))
+        self.assertEqual(mock_upload.call_count, 4)
 
 
 if __name__ == "__main__":

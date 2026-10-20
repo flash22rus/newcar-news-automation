@@ -3,6 +3,14 @@ name: NEWCAR Daily News
 
 on:
   workflow_dispatch:
+    inputs:
+      create_drafts:
+        description: Create NEWCAR drafts in Telegram and Instagram (never publish)
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 5 * * *" # 12:00 Asia/Barnaul
 
 permissions:
   contents: read
@@ -26,6 +34,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "selectolax<1.0"
+
       - name: Check required files
         run: |
           set -eu
@@ -33,15 +46,15 @@ jobs:
           test -f scripts/test_news.py
           test -f scripts/verify_news.py
           test -f scripts/test_verify_news.py
+          test -f scripts/render_editorial_report.py
+          test -f scripts/channel_drafts.py
+          test -f scripts/test_channel_drafts.py
           echo "All required files exist."
 
       - name: Check Python syntax
         run: |
-          python -m py_compile \
-            scripts/check_news.py \
-            scripts/test_news.py \
-            scripts/verify_news.py \
-            scripts/test_verify_news.py
+          set -eu
+          python -m py_compile scripts/*.py
 
       - name: Collect RSS candidates
         run: python scripts/check_news.py
@@ -52,6 +65,51 @@ jobs:
       - name: Analyze news candidates
         run: python scripts/verify_news.py
 
+      - name: Create editorial report
+        run: python scripts/render_editorial_report.py
+
+      - name: Prepare draft idempotency state
+        if: ${{ inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true') }}
+        run: |
+          mkdir -p .newcar-state
+          test -f .newcar-state/drafts.json || printf '{"version":1,"entries":{}}\n' > .newcar-state/drafts.json
+
+      - name: Restore draft idempotency state
+        if: ${{ inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true') }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .newcar-state/drafts.json
+          key: newcar-drafts-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: newcar-drafts-
+
+      - name: Create Telegram and Instagram drafts
+        if: ${{ inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true') }}
+        env:
+          NEWCAR_CREATE_DRAFTS: "true"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_TEXT_MODEL: ${{ vars.OPENAI_TEXT_MODEL }}
+          OPENAI_IMAGE_MODEL: ${{ vars.OPENAI_IMAGE_MODEL }}
+          TELEGRAM_WORKER_URL: ${{ secrets.TELEGRAM_WORKER_URL }}
+          TELEGRAM_WORKER_SECRET: ${{ secrets.TELEGRAM_WORKER_SECRET }}
+          METRICOOL_API_TOKEN: ${{ secrets.METRICOOL_API_TOKEN }}
+          METRICOOL_USER_ID: "5673565"
+          METRICOOL_BLOG_ID: "7315448"
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          NEWCAR_MIN_RELEVANCE: "75"
+          NEWCAR_MAX_DRAFTS: "3"
+        run: python scripts/channel_drafts.py
+
+      - name: Save draft idempotency state
+        if: ${{ always() && (inputs.create_drafts || (github.event_name == 'schedule' && vars.NEWCAR_ENABLE_DRAFT_PIPELINE == 'true')) }}
+        uses: actions/cache/save@v4
+        with:
+          path: .newcar-state/drafts.json
+          key: newcar-drafts-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Upload news reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -60,5 +118,8 @@ jobs:
           path: |
             news_candidates.json
             news_verification.json
+            news_editorial_report.md
+            channel_drafts.json
+            generated/*.png
           if-no-files-found: warn
           retention-days: 7

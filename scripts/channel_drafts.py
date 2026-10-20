@@ -129,10 +129,12 @@ def source_urls_for(group, web_sources, facts=None):
 
 
 def choose_groups(report, minimum_score=75, limit=3):
-    """Only high relevance groups with resolved, direct HTTPS sources qualify."""
+    """Only high relevance, Russia-focused groups with direct sources qualify."""
     chosen = []
     for group in report.get("groups", []):
         if int(group.get("relevance_score") or 0) < minimum_score:
+            continue
+        if group.get("geography") != "russia":
             continue
         members = group.get("members") or []
         if not members or any(m.get("source_url_needs_resolution") for m in members):

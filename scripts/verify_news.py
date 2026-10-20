@@ -300,6 +300,8 @@ FOREIGN_MARKET_CUES = [
     "автомобильный рынок", "внутренний рынок", "внутреннего рынка",
     "цены на автомобили", "утильсбор", "поставки автомобилей в",
     "импорт автомобилей в", "автомобилей в",
+    "в казахстан", "в украину", "в узбекистан", "в беларусь",
+    "в белоруссию", "в азербайджан",
 ]
 
 TITLE_STOP_WORDS = {
@@ -315,14 +317,17 @@ def is_excluded_news(candidate):
     title = str(candidate.get("title") or "").casefold()
     description = str(candidate.get("description") or "").casefold()
     text = f"{title} {description}"
-    if any(term in title for term in UKRAINE_EXCLUSION_TERMS):
-        return True
     foreign_market = (
         any(country in text for country in FOREIGN_MARKET_COUNTRIES)
         and any(cue in text for cue in FOREIGN_MARKET_CUES)
     )
-    has_russian_context = any(term in text for term in RUSSIAN_CONTEXT_TERMS)
-    return foreign_market and not has_russian_context
+    # A passing mention of Russia in an RSS summary must not reclassify a
+    # foreign domestic-market story as relevant. Require Russian-market
+    # context in the headline itself to retain a cross-border/import story.
+    russian_market_in_headline = any(
+        term in title for term in RUSSIAN_CONTEXT_TERMS
+    )
+    return foreign_market and not russian_market_in_headline
 
 
 def normalized_title_tokens(title):

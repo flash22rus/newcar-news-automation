@@ -270,6 +270,22 @@ class TestNewsAnalyzer(unittest.TestCase):
         groups = verify_news.build_groups(candidates)
         self.assertEqual([group["title"] for group in groups], [candidates[-1]["title"]])
 
+    def test_foreign_domestic_story_is_not_rescued_by_russia_in_description(self):
+        candidate = {
+            "title": "Авторынок Узбекистана: цены на машины снизились",
+            "description": "В России также обсуждают импорт автомобилей.",
+            "url": "https://example.com/uzbekistan-market",
+        }
+        self.assertTrue(verify_news.is_excluded_news(candidate))
+
+    def test_cross_border_story_with_russian_market_in_headline_is_kept(self):
+        candidate = {
+            "title": "Импорт автомобилей из Казахстана в Россию вырос",
+            "description": "Поставки на российский рынок увеличились.",
+            "url": "https://example.com/import-to-russia",
+        }
+        self.assertFalse(verify_news.is_excluded_news(candidate))
+
 
     def test_related_headlines_group_and_preserve_independent_sources(self):
         candidates = [

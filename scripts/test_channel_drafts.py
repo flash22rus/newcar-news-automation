@@ -316,10 +316,11 @@ class ChannelDraftsTests(unittest.TestCase):
 
     def test_only_high_score_groups_with_resolved_direct_sources_are_selected(self):
         groups = [
-            {"title": "medium", "relevance_score": 64, "members": [{"url": "https://a.example/x"}]},
-            {"title": "threshold", "relevance_score": 74, "members": [{"url": "https://b.example/x"}]},
-            {"title": "unresolved", "relevance_score": 90, "members": [{"url": "https://news.google.com/rss/x", "source_url_needs_resolution": True}]},
-            {"title": "ready", "relevance_score": 80, "members": [{"url": "https://a.example/x"}]},
+            {"title": "medium", "relevance_score": 64, "geography": "russia", "members": [{"url": "https://a.example/x"}]},
+            {"title": "threshold", "relevance_score": 74, "geography": "russia", "members": [{"url": "https://b.example/x"}]},
+            {"title": "unresolved", "relevance_score": 90, "geography": "russia", "members": [{"url": "https://news.google.com/rss/x", "source_url_needs_resolution": True}]},
+            {"title": "foreign_high_score", "relevance_score": 95, "geography": "uncertain", "members": [{"url": "https://foreign.example/x"}]},
+            {"title": "ready", "relevance_score": 80, "geography": "russia", "members": [{"url": "https://a.example/x"}]},
         ]
         chosen = channel_drafts.choose_groups({"groups": groups})
         self.assertEqual([item["title"] for item in chosen], ["ready"])
